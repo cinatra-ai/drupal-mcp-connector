@@ -1,0 +1,27 @@
+# --- Dependencies ---
+node_modules/
+
+# --- Build output (tsc outDir) ---
+dist/
+*.tsbuildinfo
+
+# --- Testing ---
+coverage/
+
+# --- Logs ---
+*.log
+
+# --- Env files & secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Lockfiles (extracted extension repos ship none; CI installs with --no-frozen-lockfile) ---
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
