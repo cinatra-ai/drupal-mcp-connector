@@ -57,6 +57,23 @@ export type DrupalNangoBearerHeaderInput = {
   label: string;
 };
 
+/**
+ * The instance fields the external-MCP toolbox needs (structural subset of the
+ * host's `DrupalInstanceSettings` — `@/lib/drupal-api` stays host-side).
+ */
+export type DrupalMcpInstance = {
+  id: string;
+  name: string;
+  siteUrl: string;
+  /** Nango connectionId under the cinatra-drupal integration. */
+  nangoConnectionId: string;
+  /** Pinned providerConfigKey for forward compatibility. */
+  providerConfigKey: string;
+};
+
+/** Probe verdict for a Drupal `drupal/mcp_tools` endpoint (host-bound probe). */
+export type DrupalMcpProbeStatus = "registered" | "not_installed" | "auth_error" | "unreachable";
+
 export interface DrupalConnectorDeps {
   decodeCursor: (cursor?: string) => number;
   buildListPage: <T>(items: T[], total: number, offset: number, limit: number) => ListPage<T>;
@@ -66,6 +83,17 @@ export interface DrupalConnectorDeps {
   buildNangoBearerHeader: (
     input: DrupalNangoBearerHeaderInput,
   ) => Promise<{ Authorization: string } | null>;
+  // ---- external-MCP toolbox surfaces (host-bound; consumed by src/mcp/toolbox.ts) ----
+  /** Configured Drupal instances (host `@/lib/drupal-api` settings). */
+  listMcpInstances: () => DrupalMcpInstance[];
+  /** Cached reachability probe of an instance's MCP endpoint (host-bound). */
+  probeMcp: (siteUrl: string, authHeader: string) => Promise<DrupalMcpProbeStatus>;
+  /** Canonical MCP endpoint URL for a site (host owns the route constant). */
+  resolveMcpServerUrl: (siteUrl: string) => string;
+  /** True for private/local URLs external LLM providers cannot reach. */
+  isPrivateUrl: (url: string) => boolean;
+  /** True when the workspace has Nango configured (credentials present). */
+  isNangoConfigured: () => boolean;
 }
 
 const DRUPAL_DEPS_KEY = Symbol.for("@cinatra-ai/drupal-mcp-connector:host-deps/v1");

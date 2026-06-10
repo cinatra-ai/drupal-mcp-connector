@@ -65,6 +65,12 @@ describe("callDrupalMcp", () => {
       }),
       dispatchContentEditor: vi.fn(async () => ""),
       buildNangoBearerHeader,
+      // External-MCP toolbox surfaces (unused by this suite's code paths).
+      listMcpInstances: () => [],
+      probeMcp: async () => "registered" as const,
+      resolveMcpServerUrl: (siteUrl: string) => siteUrl.replace(/\/+$/, "") + "/_mcp_tools",
+      isPrivateUrl: () => false,
+      isNangoConfigured: () => true,
     });
   });
 

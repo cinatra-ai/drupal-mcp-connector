@@ -32,6 +32,7 @@
     "apiVersion": "cinatra.ai/v1",
     "kind": "connector",
     "displayName": "Drupal MCP",
+    "providesExternalMcpToolbox": true,
     "requestedHostPorts": [
       "nango"
     ],
