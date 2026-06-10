@@ -98,7 +98,7 @@ export function createDrupalPrimitiveHandlers() {
     drupal_instances_list: async (_request: ExtensionPrimitiveRequest<unknown>) => {
       const instances = await listDrupalInstances();
       // Credentials live only in the Nango vault and are resolved at call time
-      // via callDrupalMcp / buildDrupalMcpServerTools. The instance row exposes
+      // via callDrupalMcp / the external-MCP toolbox. The instance row exposes
       // name/siteUrl + nangoConnectionId/providerConfigKey, with no secret
       // material, so no further stripping is needed.
       return instances;

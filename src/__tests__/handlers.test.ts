@@ -312,6 +312,12 @@ function registerContentEditorDepsStub() {
     }),
     dispatchContentEditor: dispatchMock,
     buildNangoBearerHeader: vi.fn(async () => ({ Authorization: "Bearer test" })),
+    // External-MCP toolbox surfaces (unused by this suite's code paths).
+    listMcpInstances: () => [],
+    probeMcp: async () => "registered" as const,
+    resolveMcpServerUrl: (siteUrl: string) => siteUrl.replace(/\/+$/, "") + "/_mcp_tools",
+    isPrivateUrl: () => false,
+    isNangoConfigured: () => true,
   });
 }
 
