@@ -25,3 +25,6 @@ yarn.lock
 .vscode/
 .idea/
 .DS_Store
+
+# Internal planning notes (local only)
+.planning/
