@@ -36,6 +36,24 @@
     "requestedHostPorts": [
       "nango"
     ],
-    "dependencies": []
+    "dependencies": [],
+    "widgetStream": {
+      "agentSlug": "drupal-content-editor",
+      "label": "Drupal",
+      "subjectNoun": "node",
+      "skillCapability": "widget-chat.drupal-content-editor",
+      "contextFields": [
+        { "key": "instanceId", "maxLength": 64 },
+        { "key": "nodeId", "maxLength": 32 },
+        { "key": "nodeBundle", "maxLength": 32 },
+        { "key": "nodeStatus", "maxLength": 32 },
+        { "key": "href", "maxLength": 500 }
+      ],
+      "auth": {
+        "tokenConfigKey": "drupal_widget_auth",
+        "instancesConfigKey": "drupal",
+        "requiredInstanceFields": ["id", "name", "nangoConnectionId"]
+      }
+    }
   }
 }
