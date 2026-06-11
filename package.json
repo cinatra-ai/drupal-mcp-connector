@@ -2,6 +2,11 @@
   "name": "@cinatra-ai/drupal-mcp-connector",
   "version": "0.1.0",
   "license": "Apache-2.0",
+  "files": [
+    "src",
+    "cinatra",
+    "!src/__tests__/"
+  ],
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -43,16 +48,35 @@
       "subjectNoun": "node",
       "skillCapability": "widget-chat.drupal-content-editor",
       "contextFields": [
-        { "key": "instanceId", "maxLength": 64 },
-        { "key": "nodeId", "maxLength": 32 },
-        { "key": "nodeBundle", "maxLength": 32 },
-        { "key": "nodeStatus", "maxLength": 32 },
-        { "key": "href", "maxLength": 500 }
+        {
+          "key": "instanceId",
+          "maxLength": 64
+        },
+        {
+          "key": "nodeId",
+          "maxLength": 32
+        },
+        {
+          "key": "nodeBundle",
+          "maxLength": 32
+        },
+        {
+          "key": "nodeStatus",
+          "maxLength": 32
+        },
+        {
+          "key": "href",
+          "maxLength": 500
+        }
       ],
       "auth": {
         "tokenConfigKey": "drupal_widget_auth",
         "instancesConfigKey": "drupal",
-        "requiredInstanceFields": ["id", "name", "nangoConnectionId"]
+        "requiredInstanceFields": [
+          "id",
+          "name",
+          "nangoConnectionId"
+        ]
       }
     }
   }

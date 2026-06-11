@@ -1,0 +1,11 @@
+# Trim CI/internal noise from `git archive` output (incl. GitHub "Source code"
+# auto-archives on Releases). Refs cinatra-ai/cinatra-engineering#56.
+# NOTE: use the /** form — bare directory patterns like ".github/" do not
+# recurse reliably for export-ignore.
+.github/** export-ignore
+src/__tests__ export-ignore
+src/__tests__/** export-ignore
+vitest.config.ts export-ignore
+# git/dev plumbing (npm strips .gitignore from tarballs but git archive does not)
+.gitattributes export-ignore
+.gitignore export-ignore
