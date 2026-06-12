@@ -23,12 +23,12 @@ on:
 jobs:
   release:
     permissions:
-      contents: read
+      contents: write       # GitHub Release decoration (PR-list notes + tarball/checksums assets)
       id-token: write       # build-provenance attestation
       attestations: write
     # cinatra-ai/.github ships no version tags yet, so the pin is main@020b09b
     # frozen to its commit SHA; the v0.0.0-main.<sha> pre-release comment keeps
     # the org actions-pinned-gate's `# vX.Y.Z` contract satisfied until that
     # repo cuts a real tag.
-    uses: cinatra-ai/.github/.github/workflows/reusable-extension-release.yml@020b09b7a15cb96a434db489f2a102ce26ff45d7 # v0.0.0-main.020b09b
+    uses: cinatra-ai/.github/.github/workflows/reusable-extension-release.yml@101a06e0a5ab0a6c4c0e6d4340ff7a84042a4528 # v0.0.0-main.101a06e
     secrets: inherit
