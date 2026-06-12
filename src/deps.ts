@@ -17,6 +17,11 @@
 //                         HTTP client (host-sourced from the nango-connector
 //                         extension) so this connector carries no
 //                         `@cinatra-ai/nango-connector` code import.
+//   - instance-admin   — `@/lib/drupal-api` save/delete/status + the
+//                         per-instance MCP reachability statuses
+//                         (`@/lib/drupal-mcp-connection`) consumed by the
+//                         settings page + MCP handlers (cinatra#172 Stage H2;
+//                         both host modules stay host-side).
 //
 // The deps slot is anchored on `globalThis` via a namespaced+versioned Symbol so
 // the boot-time registration and the runtime callers — which live in
@@ -69,10 +74,39 @@ export type DrupalMcpInstance = {
   nangoConnectionId: string;
   /** Pinned providerConfigKey for forward compatibility. */
   providerConfigKey: string;
+  /** Row metadata (host rows always carry these; optional for skew). */
+  lastValidatedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 /** Probe verdict for a Drupal `drupal/mcp_tools` endpoint (host-bound probe). */
 export type DrupalMcpProbeStatus = "registered" | "not_installed" | "auth_error" | "unreachable";
+
+/** Aggregate status (the `drupal_status` primitive read; host-bound). */
+export type DrupalApiStatus = {
+  instanceCount: number;
+  instances: Array<{ id: string; name: string; siteUrl: string; lastValidatedAt?: string }>;
+};
+
+/** Save-instance input envelope (structural mirror of the host's
+ * `SaveDrupalInstanceInput` — key REQUIRED for new instances, optional on
+ * edit/rotation; the host validates). */
+export type DrupalSaveInstanceInput = {
+  id?: string;
+  name: string;
+  siteUrl: string;
+  mcpApiKey?: string;
+};
+
+/** Per-instance MCP reachability status (host probe + Nango bearer). */
+export type DrupalMcpInstanceStatus = {
+  id: string;
+  name: string;
+  siteUrl: string;
+  status: DrupalMcpProbeStatus;
+  isPrivate: boolean;
+};
 
 export interface DrupalConnectorDeps {
   decodeCursor: (cursor?: string) => number;
@@ -94,6 +128,21 @@ export interface DrupalConnectorDeps {
   isPrivateUrl: (url: string) => boolean;
   /** True when the workspace has Nango configured (credentials present). */
   isNangoConfigured: () => boolean;
+  // ---- instance-admin surfaces (cinatra#172 Stage H2; the settings page +
+  //      mcp handlers consume these — `@/lib/drupal-api` and
+  //      `@/lib/drupal-mcp-connection` stay host-side) ----
+  /** Aggregate status for the `drupal_status` primitive (host-bound). */
+  getApiStatus: () => Promise<DrupalApiStatus>;
+  /** WRITER — persist an instance row (Nango import + readback host-side).
+   * Only ever called behind the settings page's manage-gated "use server"
+   * action — the same `requireExtensionAction` posture as the static import
+   * it replaces. */
+  saveInstance: (input: DrupalSaveInstanceInput) => Promise<DrupalMcpInstance>;
+  /** WRITER — hard-delete an instance row (best-effort Nango cleanup
+   * host-side). Manage-gated at the calling action, as above. */
+  deleteInstance: (id: string) => Promise<void>;
+  /** Per-instance MCP reachability statuses (host probe + Nango bearer). */
+  listInstanceStatuses: () => Promise<DrupalMcpInstanceStatus[]>;
 }
 
 const DRUPAL_DEPS_KEY = Symbol.for("@cinatra-ai/drupal-mcp-connector:host-deps/v1");
@@ -119,4 +168,15 @@ export function getDrupalDeps(): DrupalConnectorDeps {
 /** @internal test-only. */
 export function _resetDrupalDepsForTests(): void {
   _holder[DRUPAL_DEPS_KEY] = null;
+}
+
+/**
+ * Configured instances, most-recently-updated first — the host's
+ * `listDrupalInstances()` ordering, replicated connector-side over the
+ * `listMcpInstances` rows (shared by the settings page and the MCP handlers).
+ */
+export function listMcpInstancesSorted(): DrupalMcpInstance[] {
+  return [...getDrupalDeps().listMcpInstances()].sort((l, r) =>
+    (r.updatedAt ?? "").localeCompare(l.updatedAt ?? ""),
+  );
 }

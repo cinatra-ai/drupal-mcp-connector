@@ -14,12 +14,12 @@ import { Alert, AlertDescription } from "./components/ui/alert";
 import { Main, PageHeader, PageContent } from "@cinatra-ai/sdk-ui/marketplace";
 import type { ExtensionHostContext } from "@cinatra-ai/sdk-extensions";
 import { requireExtensionAction } from "@cinatra-ai/sdk-extensions";
-import {
-  deleteDrupalInstance,
-  listDrupalInstances,
-  saveDrupalInstance,
-} from "@/lib/drupal-api";
-import { getDrupalMcpInstanceStatuses } from "@/lib/drupal-mcp-connection";
+// Instance save/delete/list + per-instance MCP statuses resolve via the deps
+// slot (cinatra#172 Stage H2): `@/lib/drupal-api` / `@/lib/drupal-mcp-connection`
+// stay host-side, adapted by register(ctx) from `@cinatra-ai/host:drupal-mcp`.
+// The "use server" actions CANNOT close over the render-time ctx prop, so the
+// globalThis deps slot is the only seam that reaches them.
+import { getDrupalDeps, listMcpInstancesSorted } from "./deps";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = { title: "Drupal | Cinatra" };
@@ -35,7 +35,7 @@ async function saveInstanceAction(formData: FormData): Promise<void> {
   const name = (formData.get("name") as string) ?? "";
   const siteUrl = (formData.get("siteUrl") as string) ?? "";
   const mcpApiKey = (formData.get("mcpApiKey") as string) ?? "";
-  await saveDrupalInstance({ id, name, siteUrl, mcpApiKey });
+  await getDrupalDeps().saveInstance({ id, name, siteUrl, mcpApiKey });
   revalidatePath("/connectors/drupal");
 }
 
@@ -44,7 +44,7 @@ async function deleteInstanceAction(formData: FormData): Promise<void> {
   await requireExtensionAction("@cinatra-ai/drupal-mcp-connector", "manage");
   const id = (formData.get("id") as string) ?? "";
   if (!id) return;
-  await deleteDrupalInstance(id);
+  await getDrupalDeps().deleteInstance(id);
   revalidatePath("/connectors/drupal");
 }
 
@@ -74,8 +74,8 @@ export async function DrupalSettingsPage({ ctx }: { ctx: ExtensionHostContext })
       </Main>
     );
   }
-  const instances = await listDrupalInstances();
-  const statuses = await getDrupalMcpInstanceStatuses();
+  const instances = listMcpInstancesSorted();
+  const statuses = await getDrupalDeps().listInstanceStatuses();
   const statusById = new Map(statuses.map((s) => [s.id, s] as const));
 
   return (

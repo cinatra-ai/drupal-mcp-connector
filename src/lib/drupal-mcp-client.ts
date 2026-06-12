@@ -3,11 +3,13 @@ import "server-only";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-import type { DrupalInstanceSettings } from "@/lib/drupal-api";
 // The Nango-vault bearer header is resolved via the host DI seam so this
 // package carries no `@cinatra-ai/nango-connector` code import. The host
-// binds `buildNangoBearerHeader` at boot.
-import { getDrupalDeps } from "../deps";
+// binds `buildNangoBearerHeader` at boot. The instance row type is the
+// connector-local STRUCTURAL `DrupalMcpInstance` (cinatra#172 Stage H2) —
+// `@/lib/drupal-api`'s `DrupalInstanceSettings` stays host-side and this
+// client only reads the pointer fields below.
+import { getDrupalDeps, type DrupalMcpInstance } from "../deps";
 
 const MCP_TOOLS_PATH = "/_mcp_tools";
 
@@ -18,7 +20,7 @@ const MCP_TOOLS_PATH = "/_mcp_tools";
  * and never includes the token in error messages.
  */
 export async function callDrupalMcp(
-  instance: DrupalInstanceSettings,
+  instance: DrupalMcpInstance,
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {

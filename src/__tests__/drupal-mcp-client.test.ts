@@ -71,6 +71,11 @@ describe("callDrupalMcp", () => {
       resolveMcpServerUrl: (siteUrl: string) => siteUrl.replace(/\/+$/, "") + "/_mcp_tools",
       isPrivateUrl: () => false,
       isNangoConfigured: () => true,
+      // Instance-admin surfaces (cinatra#172 Stage H2; unused by this suite).
+      getApiStatus: vi.fn(async () => ({ instanceCount: 0, instances: [] })),
+      saveInstance: vi.fn(),
+      deleteInstance: vi.fn(),
+      listInstanceStatuses: vi.fn(async () => []),
     });
   });
 

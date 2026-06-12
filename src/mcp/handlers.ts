@@ -1,14 +1,12 @@
 import { z } from "zod";
 import type { ExtensionPrimitiveRequest } from "@cinatra-ai/sdk-extensions";
 
-import {
-  getDrupalAPIStatus,
-  listDrupalInstances,
-} from "@/lib/drupal-api";
 import { callDrupalMcp } from "../lib/drupal-mcp-client";
-// Host-shared runtime surfaces (pagination + A2A dispatch) are resolved via DI
-// so this package carries no non-SDK `@cinatra-ai/*` code dependency.
-import { getDrupalDeps } from "../deps";
+// Host-shared runtime surfaces (pagination + A2A dispatch + the instance-admin
+// reads — `@/lib/drupal-api` stays host-side, cinatra#172 Stage H2) are
+// resolved via DI so this package carries no non-SDK `@cinatra-ai/*` code
+// dependency and no `@/` host-internal edge.
+import { getDrupalDeps, listMcpInstancesSorted } from "../deps";
 
 // Strip Markdown code fences from LLM-emitted JSON before parse. The
 // wayflow-drupal-content-editor agent's LLM occasionally wraps its JSON output
@@ -79,7 +77,7 @@ export const drupalContentEditorRunSchema = z.object({
 // ---------------------------------------------------------------------------
 
 async function resolveInstance(instanceId: string) {
-  const instances = await listDrupalInstances();
+  const instances = listMcpInstancesSorted();
   const instance = instances.find((i) => i.id === instanceId);
   if (!instance) throw new Error("Drupal instance not found.");
   return instance;
@@ -92,11 +90,11 @@ async function resolveInstance(instanceId: string) {
 export function createDrupalPrimitiveHandlers() {
   return {
     drupal_status: async (_request: ExtensionPrimitiveRequest<unknown>) => {
-      return getDrupalAPIStatus();
+      return getDrupalDeps().getApiStatus();
     },
 
     drupal_instances_list: async (_request: ExtensionPrimitiveRequest<unknown>) => {
-      const instances = await listDrupalInstances();
+      const instances = listMcpInstancesSorted();
       // Credentials live only in the Nango vault and are resolved at call time
       // via callDrupalMcp / the external-MCP toolbox. The instance row exposes
       // name/siteUrl + nangoConnectionId/providerConfigKey, with no secret
