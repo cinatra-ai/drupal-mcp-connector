@@ -44,8 +44,10 @@
     "kind": "connector",
     "displayName": "Drupal MCP",
     "providesExternalMcpToolbox": true,
+    "serverEntry": "./register",
     "requestedHostPorts": [
-      "nango"
+      "nango",
+      "capabilities"
     ],
     "dependencies": [],
     "widgetStream": {

@@ -104,6 +104,7 @@ export function registerDrupalConnector(deps: DrupalConnectorDeps): void {
   _holder[DRUPAL_DEPS_KEY] = deps;
 }
 
+
 export function getDrupalDeps(): DrupalConnectorDeps {
   const deps = _holder[DRUPAL_DEPS_KEY];
   if (!deps) {
