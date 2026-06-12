@@ -104,15 +104,6 @@ export function registerDrupalConnector(deps: DrupalConnectorDeps): void {
   _holder[DRUPAL_DEPS_KEY] = deps;
 }
 
-/** True when the host runtime deps are already bound. Read by the
- * `register(ctx)` bind-if-absent skew guard (src/register.ts): on a host that
- * still binds deps statically at boot (pre transport-DI cutover) the host's
- * eager binding wins; on a cutover host nothing else binds, so register(ctx)
- * binds the lazy capability-resolving deps. Swept once every host the
- * connector can meet is post-cutover. */
-export function hasDrupalDeps(): boolean {
-  return _holder[DRUPAL_DEPS_KEY] != null;
-}
 
 export function getDrupalDeps(): DrupalConnectorDeps {
   const deps = _holder[DRUPAL_DEPS_KEY];
