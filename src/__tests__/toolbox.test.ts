@@ -41,6 +41,11 @@ beforeEach(() => {
     resolveMcpServerUrl: (siteUrl: string) => siteUrl.replace(/\/+$/, "") + "/_mcp_tools",
     isPrivateUrl: (url: string) => /localhost|127\.0\.0\.1|::1/.test(url),
     isNangoConfigured,
+    // Instance-admin surfaces (cinatra#172 Stage H2; unused by this suite).
+    getApiStatus: vi.fn(async () => ({ instanceCount: 0, instances: [] })),
+    saveInstance: vi.fn(),
+    deleteInstance: vi.fn(),
+    listInstanceStatuses: vi.fn(async () => []),
   });
 });
 

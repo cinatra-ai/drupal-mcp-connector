@@ -40,6 +40,12 @@ type HostDrupalMcpShape = {
   probe: DrupalConnectorDeps["probeMcp"];
   resolveServerUrl: DrupalConnectorDeps["resolveMcpServerUrl"];
   isPrivateUrl: DrupalConnectorDeps["isPrivateUrl"];
+  // Instance-admin surface (cinatra#172 Stage H2). Host-side member names
+  // (the SDK contract's) — the deps members keep connector-local names.
+  getAPIStatus: DrupalConnectorDeps["getApiStatus"];
+  saveInstance: DrupalConnectorDeps["saveInstance"];
+  deleteInstance: DrupalConnectorDeps["deleteInstance"];
+  getInstanceStatuses: DrupalConnectorDeps["listInstanceStatuses"];
 };
 
 /** Lazy per-concern host-service resolution (fail-loud on a missing service —
@@ -89,6 +95,14 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): DrupalConnectorDeps {
     resolveMcpServerUrl: (siteUrl) => drupalMcp().resolveServerUrl(siteUrl),
     isPrivateUrl: (url) => drupalMcp().isPrivateUrl(url),
     isNangoConfigured: () => nango().isNangoConfigured(),
+    // Instance-admin surface (cinatra#172 Stage H2): the writers stay behind
+    // the settings page's manage-gated "use server" actions — the adapter
+    // adds no gating of its own (the host service's TRUST note documents the
+    // shared in-process capability id).
+    getApiStatus: () => drupalMcp().getAPIStatus(),
+    saveInstance: (input) => drupalMcp().saveInstance(input),
+    deleteInstance: (id) => drupalMcp().deleteInstance(id),
+    listInstanceStatuses: () => drupalMcp().getInstanceStatuses(),
   };
 }
 

@@ -1,16 +1,40 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
-vi.mock("@/lib/drupal-api", () => ({
-  listDrupalInstances: vi.fn(),
-  getDrupalAPIStatus: vi.fn(),
-}));
+// `@/lib/drupal-api` is GONE from the handlers graph (cinatra#172 Stage H2):
+// the instance reads resolve via the deps slot, so this suite stubs the slot
+// (registerDrupalConnector) instead of mocking a host module.
 vi.mock("../lib/drupal-mcp-client", () => ({
   callDrupalMcp: vi.fn(),
 }));
 
-import { listDrupalInstances, getDrupalAPIStatus } from "@/lib/drupal-api";
 import { callDrupalMcp } from "../lib/drupal-mcp-client";
 import { createDrupalPrimitiveHandlers } from "@cinatra-ai/drupal-mcp-connector/mcp-handlers";
+
+// Deps-slot member mocks for the host-bound instance-admin surface.
+const listMcpInstancesMock = vi.fn((): any[] => []);
+const getApiStatusMock = vi.fn(async () => ({ instanceCount: 0, instances: [] as any[] }));
+
+function registerHandlersDepsStub() {
+  registerDrupalConnector({
+    decodeCursor: (cursor?: string) => (cursor ? Number(cursor) : 0),
+    buildListPage: (items, total, offset, limit) => ({
+      items,
+      total,
+      nextCursor: offset + limit < total ? String(offset + limit) : undefined,
+    }),
+    dispatchContentEditor: vi.fn(async () => ""),
+    buildNangoBearerHeader: vi.fn(async () => ({ Authorization: "Bearer test" })),
+    listMcpInstances: listMcpInstancesMock,
+    probeMcp: async () => "registered" as const,
+    resolveMcpServerUrl: (siteUrl: string) => siteUrl.replace(/\/+$/, "") + "/_mcp_tools",
+    isPrivateUrl: () => false,
+    isNangoConfigured: () => true,
+    getApiStatus: getApiStatusMock,
+    saveInstance: vi.fn(),
+    deleteInstance: vi.fn(),
+    listInstanceStatuses: vi.fn(async () => []),
+  });
+}
 
 // Actual tool names discovered 2026-04-27 against Drupal 11 + mcp_tools ^1.0@beta:
 // drupal_node_get uses mcp_tools_get_recent_content because search requires
@@ -38,12 +62,51 @@ describe("createDrupalPrimitiveHandlers", () => {
   let handlers: ReturnType<typeof createDrupalPrimitiveHandlers>;
   beforeEach(() => {
     handlers = createDrupalPrimitiveHandlers();
-    vi.mocked(listDrupalInstances).mockReset();
+    listMcpInstancesMock.mockReset();
+    listMcpInstancesMock.mockReturnValue([]);
+    getApiStatusMock.mockClear();
     vi.mocked(callDrupalMcp).mockReset();
+    registerHandlersDepsStub();
+  });
+
+  afterEach(() => {
+    _resetDrupalDepsForTests();
+  });
+
+  it("drupal_status reads the host-bound aggregate status via the deps slot", async () => {
+    getApiStatusMock.mockResolvedValueOnce({
+      instanceCount: 1,
+      instances: [{ id: "a", name: "Site", siteUrl: "http://localhost:8082" }] as any[],
+    });
+    const result = await (handlers as any).drupal_status({
+      primitiveName: "drupal_status",
+      input: {},
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    });
+    expect(result).toEqual({
+      instanceCount: 1,
+      instances: [{ id: "a", name: "Site", siteUrl: "http://localhost:8082" }],
+    });
+    expect(getApiStatusMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("drupal_instances_list sorts most-recently-updated first (the host listDrupalInstances ordering)", async () => {
+    listMcpInstancesMock.mockReturnValue([
+      { ...inst({ id: "old" }), updatedAt: "2026-01-01T00:00:00Z" },
+      { ...inst({ id: "new" }), updatedAt: "2026-02-01T00:00:00Z" },
+    ]);
+    const result = (await (handlers as any).drupal_instances_list({
+      primitiveName: "drupal_instances_list",
+      input: {},
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    })) as any[];
+    expect(result.map((i) => i.id)).toEqual(["new", "old"]);
   });
 
   it("drupal_instances_list returns the configured instances with no credential-bearing field", async () => {
-    vi.mocked(listDrupalInstances).mockResolvedValue([inst({ id: "a" }), inst({ id: "b" })]);
+    listMcpInstancesMock.mockReturnValue([inst({ id: "a" }), inst({ id: "b" })]);
     const result = (await (handlers as any).drupal_instances_list({
       primitiveName: "drupal_instances_list",
       input: {},
@@ -60,7 +123,7 @@ describe("createDrupalPrimitiveHandlers", () => {
   });
 
   it("drupal_node_get throws when instanceId not found", async () => {
-    vi.mocked(listDrupalInstances).mockResolvedValue([inst({ id: "site-1" })]);
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
     await expect(
       (handlers as any).drupal_node_get({
         primitiveName: "drupal_node_get",
@@ -72,7 +135,7 @@ describe("createDrupalPrimitiveHandlers", () => {
   });
 
   it("drupal_node_get dispatches to mcp_tools_get_recent_content and finds node by id", async () => {
-    vi.mocked(listDrupalInstances).mockResolvedValue([inst({ id: "site-1" })]);
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
     // Response shape after callDrupalMcp unwraps the data envelope: { content: [...] }
     vi.mocked(callDrupalMcp).mockResolvedValue({ content: [{ id: "5", title: "Hi" }] });
     const result = await (handlers as any).drupal_node_get({
@@ -90,7 +153,7 @@ describe("createDrupalPrimitiveHandlers", () => {
   });
 
   it("drupal_node_get throws when node id not in recent list", async () => {
-    vi.mocked(listDrupalInstances).mockResolvedValue([inst({ id: "site-1" })]);
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
     vi.mocked(callDrupalMcp).mockResolvedValue({ content: [{ id: "99", title: "Other" }] });
     await expect(
       (handlers as any).drupal_node_get({
@@ -103,7 +166,7 @@ describe("createDrupalPrimitiveHandlers", () => {
   });
 
   it("drupal_node_update dispatches to mcp_update_content with nid + updates object intact", async () => {
-    vi.mocked(listDrupalInstances).mockResolvedValue([inst({ id: "site-1" })]);
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
     vi.mocked(callDrupalMcp).mockResolvedValue({ ok: true });
     await (handlers as any).drupal_node_update({
       primitiveName: "drupal_node_update",
@@ -120,7 +183,7 @@ describe("createDrupalPrimitiveHandlers", () => {
   });
 
   it("drupal_node_create_draft_revision dispatches to mcp_create_content with status:false", async () => {
-    vi.mocked(listDrupalInstances).mockResolvedValue([inst({ id: "site-1" })]);
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
     vi.mocked(callDrupalMcp).mockResolvedValue({ nid: 10 });
     await (handlers as any).drupal_node_create_draft_revision({
       primitiveName: "drupal_node_create_draft_revision",
@@ -136,7 +199,7 @@ describe("createDrupalPrimitiveHandlers", () => {
   });
 
   it("drupal_node_update strips empty-string field values before dispatch", async () => {
-    vi.mocked(listDrupalInstances).mockResolvedValue([inst({ id: "site-1" })]);
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
     vi.mocked(callDrupalMcp).mockResolvedValue({ ok: true });
 
     await (handlers as any).drupal_node_update({
@@ -165,7 +228,7 @@ describe("createDrupalPrimitiveHandlers", () => {
   });
 
   it("drupal_node_create_draft_revision strips empty-string field values before dispatch", async () => {
-    vi.mocked(listDrupalInstances).mockResolvedValue([inst({ id: "site-1" })]);
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
     vi.mocked(callDrupalMcp).mockResolvedValue({ nid: 10 });
 
     await (handlers as any).drupal_node_create_draft_revision({
@@ -191,7 +254,7 @@ describe("createDrupalPrimitiveHandlers", () => {
   // `v != null && v !== ""`, etc.) would silently break boolean-clear
   // semantics with no failing test.
   it("drupal_node_update preserves null/false/0 — only \"\" is filtered", async () => {
-    vi.mocked(listDrupalInstances).mockResolvedValue([inst({ id: "site-1" })]);
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
     vi.mocked(callDrupalMcp).mockResolvedValue({ ok: true });
 
     await (handlers as any).drupal_node_update({
@@ -220,7 +283,7 @@ describe("createDrupalPrimitiveHandlers", () => {
   // success. The runtime throw closes that hole; this test pins it so a
   // future refactor that deletes the guard fails loudly.
   it("drupal_node_update throws when ALL fields are empty strings (no MCP call dispatched)", async () => {
-    vi.mocked(listDrupalInstances).mockResolvedValue([inst({ id: "site-1" })]);
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
     vi.mocked(callDrupalMcp).mockResolvedValue({ ok: true });
 
     await expect(
@@ -241,7 +304,7 @@ describe("createDrupalPrimitiveHandlers", () => {
   });
 
   it("drupal_node_publish dispatches to mcp_publish_content with nid and publish:true", async () => {
-    vi.mocked(listDrupalInstances).mockResolvedValue([inst({ id: "site-1" })]);
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
     vi.mocked(callDrupalMcp).mockResolvedValue("published");
     await (handlers as any).drupal_node_publish({
       primitiveName: "drupal_node_publish",
@@ -318,6 +381,11 @@ function registerContentEditorDepsStub() {
     resolveMcpServerUrl: (siteUrl: string) => siteUrl.replace(/\/+$/, "") + "/_mcp_tools",
     isPrivateUrl: () => false,
     isNangoConfigured: () => true,
+    // Instance-admin surfaces (cinatra#172 Stage H2; unused by this suite).
+    getApiStatus: vi.fn(async () => ({ instanceCount: 0, instances: [] })),
+    saveInstance: vi.fn(),
+    deleteInstance: vi.fn(),
+    listInstanceStatuses: vi.fn(async () => []),
   });
 }
 

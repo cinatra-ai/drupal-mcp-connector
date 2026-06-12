@@ -12,19 +12,9 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 //   4. non-JSON prose      -> returns { result: "Edit complete." }
 //   5. dispatch is invoked with the serialized input + default agentUrl + 300s
 
-vi.mock("@/lib/drupal-api", () => ({
-  listDrupalInstances: vi.fn(async () => [
-    {
-      id: "site-1",
-      name: "Site 1",
-      siteUrl: "http://localhost:8082",
-      mcpApiKey: "k",
-      createdAt: "2026-01-01T00:00:00Z",
-      updatedAt: "2026-01-01T00:00:00Z",
-    },
-  ]),
-  getDrupalAPIStatus: vi.fn(),
-}));
+// No `@/lib/drupal-api` mock: the handlers graph carries no host-internal
+// import since the instance-admin deps cutover (cinatra#172 Stage H2) — the
+// deps stub below is the only seam.
 vi.mock("../lib/drupal-mcp-client", () => ({
   callDrupalMcp: vi.fn(),
 }));
@@ -55,6 +45,11 @@ function registerDepsStub() {
     resolveMcpServerUrl: (siteUrl: string) => siteUrl.replace(/\/+$/, "") + "/_mcp_tools",
     isPrivateUrl: () => false,
     isNangoConfigured: () => true,
+    // Instance-admin surfaces (cinatra#172 Stage H2; unused by this suite).
+    getApiStatus: vi.fn(async () => ({ instanceCount: 0, instances: [] })),
+    saveInstance: vi.fn(),
+    deleteInstance: vi.fn(),
+    listInstanceStatuses: vi.fn(async () => []),
   });
 }
 
