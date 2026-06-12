@@ -1,12 +1,12 @@
 // `register(ctx)` shape — the Stage 3 transport-DI inversion: the connector
-// binds its host deps slot itself (bind-if-absent skew guard, lazy per-call
+// binds its host deps slot itself (always-bind since the post-cutover sweep, lazy per-call
 // host-service resolution, nango members over the connector-authored
 // `nango-system` surface). Leaf-graph pin: the entry imports ONLY ./deps.
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import { register } from "../register";
-import { getDrupalDeps, hasDrupalDeps, registerDrupalConnector, _resetDrupalDepsForTests } from "../deps";
+import { getDrupalDeps, registerDrupalConnector, _resetDrupalDepsForTests } from "../deps";
 
 function activateWithServices(impls: Record<string, unknown>) {
   const resolveProviders = vi.fn((capability: string) =>
@@ -39,7 +39,6 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
         isPrivateUrl: vi.fn(),
       },
     });
-    expect(hasDrupalDeps()).toBe(true);
     // No host-service resolution happened at registration (probe-safe).
     expect(resolveProviders).not.toHaveBeenCalled();
     expect(getDrupalDeps().decodeCursor("x")).toBe(7);
@@ -48,12 +47,12 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
     expect(listInstances).toHaveBeenCalledTimes(1);
   });
 
-  it("does NOT replace a pre-bound deps slot (bind-if-absent skew guard)", () => {
+  it("REPLACES a pre-bound deps slot (always-bind — a hot-update digest swap re-binds fresh resolvers)", () => {
     const sentinel = vi.fn(() => 42);
     registerDrupalConnector({ decodeCursor: sentinel } as never);
     activateWithServices({ "@cinatra-ai/host:mcp-pagination": { decodeCursor: () => 0 } });
-    expect(getDrupalDeps().decodeCursor("x")).toBe(42);
-    expect(sentinel).toHaveBeenCalledTimes(1);
+    expect(getDrupalDeps().decodeCursor("x")).toBe(0);
+    expect(sentinel).not.toHaveBeenCalled();
   });
 
   it("nango members delegate to the connector-authored nango-system surface", async () => {
