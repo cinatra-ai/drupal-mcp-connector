@@ -62,6 +62,7 @@
     "dependencies": [],
     "widgetStream": {
       "agentSlug": "drupal-content-editor",
+      "relayAgentPackage": "@cinatra-ai/drupal-agent",
       "label": "Drupal",
       "subjectNoun": "node",
       "skillCapability": "widget-chat.drupal-content-editor",
