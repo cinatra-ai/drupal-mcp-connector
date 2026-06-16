@@ -245,7 +245,8 @@ export function createDrupalPrimitiveHandlers() {
       const input = drupalContentEditorRunSchema.parse(request.input);
 
       const a2aUrl =
-        process.env.DRUPAL_CONTENT_EDITOR_A2A_URL ?? "http://localhost:3020";
+        process.env.DRUPAL_CONTENT_EDITOR_A2A_URL ??
+        "http://localhost:3010/agents/cinatra-ai/drupal-agent";
 
       const text = await getDrupalDeps().dispatchContentEditor({
         agentUrl: a2aUrl,

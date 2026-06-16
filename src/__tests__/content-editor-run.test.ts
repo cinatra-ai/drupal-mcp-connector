@@ -129,7 +129,7 @@ describe("drupal_content_editor_run - reply-text handling", () => {
       payload: string;
       timeoutMs: number;
     };
-    expect(arg.agentUrl).toBe("http://localhost:3020");
+    expect(arg.agentUrl).toBe("http://localhost:3010/agents/cinatra-ai/drupal-agent");
     expect(arg.timeoutMs).toBe(300_000);
     const payload = JSON.parse(arg.payload);
     expect(payload.instanceId).toBe("site-1");
