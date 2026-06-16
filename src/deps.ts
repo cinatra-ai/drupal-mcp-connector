@@ -47,6 +47,14 @@ export type DrupalDispatchContentEditorInput = {
   payload: string;
   /** Blocking budget in ms (the connector passes 300_000 to align with /chat). */
   timeoutMs: number;
+  /**
+   * npm package name of the content-editor agent (cinatra#246). The host uses
+   * it to resolve the agent template and pre-create a real `agent_run` row
+   * bound to the deployment's identity, so the downstream `/api/mcp` CMS write
+   * is authorized through the production agent-run OBO path (not the dev-admin
+   * bypass). Always `@cinatra-ai/drupal-agent` for this connector.
+   */
+  packageName: string;
 };
 
 /**

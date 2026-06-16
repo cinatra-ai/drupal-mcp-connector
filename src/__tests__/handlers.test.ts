@@ -362,7 +362,12 @@ import {
 } from "../deps";
 
 const dispatchMock = vi.fn(
-  async (_input: { agentUrl: string; payload: string; timeoutMs: number }) => "",
+  async (_input: {
+    agentUrl: string;
+    payload: string;
+    timeoutMs: number;
+    packageName: string;
+  }) => "",
 );
 
 function registerContentEditorDepsStub() {
@@ -402,7 +407,7 @@ describe("drupal_content_editor_run", () => {
     _resetDrupalDepsForTests();
   });
 
-  it("dispatches with the default agentUrl http://localhost:3020 when the env var is unset", async () => {
+  it("dispatches with the default :3010 agent route when the env var is unset", async () => {
     // beforeEach already deletes the env var, but assert it explicitly so this test
     // documents the contract for future readers.
     delete process.env.DRUPAL_CONTENT_EDITOR_A2A_URL;
@@ -418,7 +423,7 @@ describe("drupal_content_editor_run", () => {
     });
 
     expect(dispatchMock).toHaveBeenCalledWith(
-      expect.objectContaining({ agentUrl: "http://localhost:3020" }),
+      expect.objectContaining({ agentUrl: "http://localhost:3010/agents/cinatra-ai/drupal-agent" }),
     );
   });
 
@@ -437,7 +442,7 @@ describe("drupal_content_editor_run", () => {
     ).rejects.toThrow();
   });
 
-  it("calls dispatchContentEditor with default localhost:3020 and timeout 300_000", async () => {
+  it("calls dispatchContentEditor with default :3010 agent route and timeout 300_000", async () => {
     dispatchMock.mockResolvedValue('{"nodeId":"5","changes":[]}');
     await (handlers as any).drupal_content_editor_run({
       primitiveName: "drupal_content_editor_run",
@@ -453,8 +458,10 @@ describe("drupal_content_editor_run", () => {
     });
     expect(dispatchMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        agentUrl: "http://localhost:3020",
+        agentUrl: "http://localhost:3010/agents/cinatra-ai/drupal-agent",
         timeoutMs: 300_000,
+        // cinatra#246: agent package name drives host-side OBO run creation.
+        packageName: "@cinatra-ai/drupal-agent",
       }),
     );
   });
