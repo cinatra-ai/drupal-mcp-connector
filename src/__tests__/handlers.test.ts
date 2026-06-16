@@ -362,7 +362,12 @@ import {
 } from "../deps";
 
 const dispatchMock = vi.fn(
-  async (_input: { agentUrl: string; payload: string; timeoutMs: number }) => "",
+  async (_input: {
+    agentUrl: string;
+    payload: string;
+    timeoutMs: number;
+    packageName: string;
+  }) => "",
 );
 
 function registerContentEditorDepsStub() {
@@ -455,6 +460,8 @@ describe("drupal_content_editor_run", () => {
       expect.objectContaining({
         agentUrl: "http://localhost:3020",
         timeoutMs: 300_000,
+        // cinatra#246: agent package name drives host-side OBO run creation.
+        packageName: "@cinatra-ai/drupal-agent",
       }),
     );
   });
