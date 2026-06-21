@@ -58,18 +58,36 @@ const inst = (over: Partial<{ id: string; name: string; siteUrl: string; nangoCo
   updatedAt: "2026-01-01T00:00:00Z",
 });
 
+// JSON:API fetch mock. `drupal_node_get` now reads the full node via JSON:API
+// (the field-level-diff fix), falling back to mcp_tools_get_recent_content only
+// when JSON:API is unavailable. A `Response`-shaped helper keeps the tests
+// transport-agnostic.
+const fetchMock = vi.fn();
+function jsonApiResponse(body: unknown, ok = true, status = 200) {
+  return {
+    ok,
+    status,
+    json: async () => body,
+  } as unknown as Response;
+}
+
 describe("createDrupalPrimitiveHandlers", () => {
   let handlers: ReturnType<typeof createDrupalPrimitiveHandlers>;
+  let originalFetch: typeof globalThis.fetch;
   beforeEach(() => {
     handlers = createDrupalPrimitiveHandlers();
     listMcpInstancesMock.mockReset();
     listMcpInstancesMock.mockReturnValue([]);
     getApiStatusMock.mockClear();
     vi.mocked(callDrupalMcp).mockReset();
+    fetchMock.mockReset();
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
     registerHandlersDepsStub();
   });
 
   afterEach(() => {
+    globalThis.fetch = originalFetch;
     _resetDrupalDepsForTests();
   });
 
@@ -134,8 +152,10 @@ describe("createDrupalPrimitiveHandlers", () => {
     ).rejects.toThrow(/instance not found/i);
   });
 
-  it("drupal_node_get dispatches to mcp_tools_get_recent_content and finds node by id", async () => {
+  it("drupal_node_get falls back to mcp_tools_get_recent_content when JSON:API is unavailable", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
+    // JSON:API down (bundles fetch rejects) → handler falls back to the summary lookup.
+    fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
     // Response shape after callDrupalMcp unwraps the data envelope: { content: [...] }
     vi.mocked(callDrupalMcp).mockResolvedValue({ content: [{ id: "5", title: "Hi" }] });
     const result = await (handlers as any).drupal_node_get({
@@ -152,8 +172,9 @@ describe("createDrupalPrimitiveHandlers", () => {
     expect(result).toMatchObject({ id: "5", title: "Hi" });
   });
 
-  it("drupal_node_get throws when node id not in recent list", async () => {
+  it("drupal_node_get throws when node id not in JSON:API or recent list", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
+    fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
     vi.mocked(callDrupalMcp).mockResolvedValue({ content: [{ id: "99", title: "Other" }] });
     await expect(
       (handlers as any).drupal_node_get({
@@ -163,6 +184,152 @@ describe("createDrupalPrimitiveHandlers", () => {
         mode: "agentic",
       }),
     ).rejects.toThrow(/not found/i);
+  });
+
+  // ---- The field-level-diff fix: JSON:API full-field read ----
+  // The agent's STEP 1 read must surface editable before-values (notably the raw
+  // `body` source HTML) so STEP 4 can emit a real before/after change set, the
+  // same way the WordPress agent's `wordpress_post_get` full read does.
+
+  it("drupal_node_get reads the full node via JSON:API and flattens body.value to a top-level string", async () => {
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
+    // 1st fetch: node_type bundle list. 2nd fetch: node/article filtered by nid.
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonApiResponse({
+          data: [
+            { type: "node_type--node_type", id: "u-art", attributes: { drupal_internal__type: "article" } },
+            { type: "node_type--node_type", id: "u-pg", attributes: { drupal_internal__type: "page" } },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonApiResponse({
+          data: [
+            {
+              type: "node--article",
+              id: "uuid-123",
+              attributes: {
+                drupal_internal__nid: 5,
+                title: "Old headline",
+                status: true,
+                body: {
+                  value: "<p>Old body source</p>",
+                  summary: "Old summary",
+                  format: "basic_html",
+                  // `processed` MUST NOT become the before-value (rendered output).
+                  processed: "<p>Old body RENDERED</p>",
+                },
+              },
+            },
+          ],
+        }),
+      );
+
+    const result = (await (handlers as any).drupal_node_get({
+      primitiveName: "drupal_node_get",
+      input: { instanceId: "site-1", nodeId: "5" },
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    })) as any;
+
+    // The summary lookup must NOT be used when JSON:API succeeds.
+    expect(callDrupalMcp).not.toHaveBeenCalled();
+    // Editable before-values are present at the top level for the agent to diff.
+    expect(result.id).toBe("5");
+    expect(result.nid).toBe(5);
+    expect(result.uuid).toBe("uuid-123");
+    expect(result.bundle).toBe("article");
+    expect(result.title).toBe("Old headline");
+    expect(result.status).toBe(true);
+    // body is the RAW source `value`, not the rendered `processed`.
+    expect(result.body).toBe("<p>Old body source</p>");
+    expect(result.body).not.toContain("RENDERED");
+    expect(result.summary).toBe("Old summary");
+  });
+
+  it("drupal_node_get JSON:API read iterates bundles until the nid matches", async () => {
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
+    fetchMock
+      // bundles: page first, then article
+      .mockResolvedValueOnce(
+        jsonApiResponse({
+          data: [
+            { type: "node_type--node_type", id: "u-pg", attributes: { drupal_internal__type: "page" } },
+            { type: "node_type--node_type", id: "u-art", attributes: { drupal_internal__type: "article" } },
+          ],
+        }),
+      )
+      // page bundle: empty (nid not a page)
+      .mockResolvedValueOnce(jsonApiResponse({ data: [] }))
+      // article bundle: hit
+      .mockResolvedValueOnce(
+        jsonApiResponse({
+          data: [
+            {
+              type: "node--article",
+              id: "uuid-7",
+              attributes: { drupal_internal__nid: 7, title: "Found", body: { value: "B" } },
+            },
+          ],
+        }),
+      );
+
+    const result = (await (handlers as any).drupal_node_get({
+      primitiveName: "drupal_node_get",
+      input: { instanceId: "site-1", nodeId: "7" },
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    })) as any;
+
+    expect(result.nid).toBe(7);
+    expect(result.bundle).toBe("article");
+    expect(result.body).toBe("B");
+    // bundle list + 2 bundle queries = 3 fetches.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("drupal_node_get JSON:API read defaults body/summary to empty string when the node has no body field", async () => {
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonApiResponse({
+          data: [{ type: "node_type--node_type", id: "u-pg", attributes: { drupal_internal__type: "page" } }],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonApiResponse({
+          data: [
+            { type: "node--page", id: "uuid-9", attributes: { drupal_internal__nid: 9, title: "Bare page" } },
+          ],
+        }),
+      );
+
+    const result = (await (handlers as any).drupal_node_get({
+      primitiveName: "drupal_node_get",
+      input: { instanceId: "site-1", nodeId: "9" },
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    })) as any;
+
+    expect(result.title).toBe("Bare page");
+    expect(result.body).toBe("");
+    expect(result.summary).toBe("");
+  });
+
+  it("drupal_node_get rejects an invalid nodeId BEFORE any read (no JSON:API, no summary fallback)", async () => {
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
+    await expect(
+      (handlers as any).drupal_node_get({
+        primitiveName: "drupal_node_get",
+        input: { instanceId: "site-1", nodeId: "0" },
+        actor: { actorType: "model", source: "agent" },
+        mode: "agentic",
+      }),
+    ).rejects.toThrow(/not a positive integer/i);
+    // Validation throws before the handler touches JSON:API or the summary tool.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(callDrupalMcp).not.toHaveBeenCalled();
   });
 
   it("drupal_node_update dispatches to mcp_update_content with nid + updates object intact", async () => {

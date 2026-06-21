@@ -24,10 +24,27 @@ const TOOL = {
   UPDATE: "mcp_update_content",
   // mcp_create_content with status:false creates a draft revision
   CREATE_DRAFT: "mcp_create_content",
-  // drupal_node_get uses LIST (not READ) because mcp_tools_search_content requires ≥3 chars
-  // and does not support nid-specific lookup.
+  // drupal_node_get falls back to LIST (not READ) when JSON:API is unavailable
+  // because mcp_tools_search_content requires ≥3 chars and does not support
+  // nid-specific lookup.
   LIST: "mcp_tools_get_recent_content",
   PUBLISH: "mcp_publish_content",
+} as const;
+
+// JSON:API constants. The Drupal core JSON:API module (enabled by default on
+// Drupal 11 and required by the connector's install profile) exposes the full
+// field set of a node — crucially the editable `body.value` source HTML — which
+// the `mcp_tools_get_recent_content` summary row does NOT carry. The
+// content-editor agent's STEP 1 read must surface these before-values so its
+// STEP 4 field-level diff (`changes: [{ field, before, after }]`) is populated
+// the same way the WordPress agent's `wordpress_post_get` full read does.
+const JSONAPI = {
+  ACCEPT: "application/vnd.api+json",
+  // Per-bundle node collection. JSON:API has no bundle-agnostic /jsonapi/node
+  // (404), so the handler enumerates bundles and filters each by the numeric
+  // nid (globally unique across bundles in Drupal).
+  BUNDLES_PATH: "/jsonapi/node_type/node_type",
+  NODE_COLLECTION: (bundle: string) => `/jsonapi/node/${bundle}`,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -84,6 +101,122 @@ async function resolveInstance(instanceId: string) {
 }
 
 // ---------------------------------------------------------------------------
+// JSON:API full-field read (the field-level-diff fix).
+//
+// The content-editor agent's STEP 1 must see the editable before-values
+// (`title`, `body`, `summary`, …) so STEP 4 can emit a real before/after diff.
+// `mcp_tools_get_recent_content` only carries a summary row without `body`, so
+// the read is upgraded to a JSON:API full-field fetch. The Nango-vault bearer is
+// resolved via the host DI seam (same as the MCP client); JSON:API is read with
+// `Authorization` when available and best-effort anonymously otherwise (core
+// JSON:API permits anonymous reads of published content on the dev profile).
+// ---------------------------------------------------------------------------
+
+type JsonApiResource = {
+  id: string;
+  type?: string;
+  attributes?: Record<string, unknown>;
+};
+
+async function jsonApiGet(
+  instance: { id: string; siteUrl: string; nangoConnectionId: string; providerConfigKey: string },
+  pathWithQuery: string,
+): Promise<unknown> {
+  const base = instance.siteUrl.replace(/\/+$/, "");
+  const url = base + pathWithQuery;
+  // Best-effort bearer — JSON:API may permit anonymous reads, so a missing
+  // credential is NOT fatal here (unlike the MCP write path).
+  let authHeader: { Authorization: string } | null = null;
+  try {
+    authHeader = await getDrupalDeps().buildNangoBearerHeader({
+      providerConfigKey: instance.providerConfigKey,
+      connectionId: instance.nangoConnectionId,
+      label: `drupal-jsonapi-${instance.id}`,
+    });
+  } catch {
+    authHeader = null;
+  }
+  const headers: Record<string, string> = { Accept: JSONAPI.ACCEPT };
+  if (authHeader) headers.Authorization = authHeader.Authorization;
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    throw new Error(`Drupal JSON:API ${pathWithQuery} → HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+// Flatten a JSON:API node resource into the flat object the content-editor
+// agent reads in STEP 1. Editable before-values are surfaced at the top level
+// — notably `body` as the raw `body.value` source HTML (NOT `body.processed`,
+// which is filter-expanded render output and the wrong before-value for a write
+// diff). `id` is the numeric nid string so it stays continuous with the write
+// path (drupal_node_update keys on nodeId, not the JSON:API uuid).
+function flattenJsonApiNode(resource: JsonApiResource): Record<string, unknown> {
+  const attrs = resource.attributes ?? {};
+  const nid = attrs.drupal_internal__nid;
+  const bodyField = attrs.body as
+    | { value?: unknown; summary?: unknown; format?: unknown }
+    | undefined;
+  // Spread scalar attributes first, then overwrite `body`/`summary` with the
+  // flattened string forms so the compound `attributes.body` object can never
+  // clobber the top-level editable `body` string (codex must-fix).
+  return {
+    ...attrs,
+    id: nid != null ? String(nid) : resource.id,
+    nid: nid != null ? Number(nid) : undefined,
+    uuid: resource.id,
+    bundle: typeof resource.type === "string" ? resource.type.replace(/^node--/, "") : undefined,
+    title: attrs.title,
+    body: typeof bodyField?.value === "string" ? bodyField.value : "",
+    summary: typeof bodyField?.summary === "string" ? bodyField.summary : "",
+    status: attrs.status,
+  };
+}
+
+// Full-field JSON:API read of a node by numeric nid. Enumerates node bundles
+// (cheap, cached endpoint) and queries each bundle's collection filtered by
+// `drupal_internal__nid` (globally unique across bundles) until a hit. Returns
+// the flattened node, or null when JSON:API is unavailable / the node is not
+// found — the caller then falls back to the recent-content summary lookup.
+async function readNodeViaJsonApi(
+  instance: { id: string; siteUrl: string; nangoConnectionId: string; providerConfigKey: string },
+  nid: number,
+): Promise<Record<string, unknown> | null> {
+  // Enumerate node bundle machine names.
+  const bundlesDoc = (await jsonApiGet(
+    instance,
+    `${JSONAPI.BUNDLES_PATH}?fields%5Bnode_type--node_type%5D=drupal_internal__type`,
+  )) as { data?: Array<{ attributes?: { drupal_internal__type?: unknown } }> };
+  const bundles = Array.isArray(bundlesDoc?.data)
+    ? bundlesDoc.data
+        .map((b) => b.attributes?.drupal_internal__type)
+        .filter((t): t is string => typeof t === "string")
+    : [];
+  if (bundles.length === 0) return null;
+
+  for (const bundle of bundles) {
+    // filter[drupal_internal__nid]={nid}&page[limit]=1 — bracket chars are
+    // percent-encoded so the query string is well-formed.
+    const query =
+      `?filter%5Bdrupal_internal__nid%5D=${encodeURIComponent(String(nid))}` +
+      `&page%5Blimit%5D=1`;
+    let doc: { data?: JsonApiResource[] };
+    try {
+      doc = (await jsonApiGet(
+        instance,
+        JSONAPI.NODE_COLLECTION(bundle) + query,
+      )) as { data?: JsonApiResource[] };
+    } catch {
+      // A single bundle 403/404 is non-fatal — try the next bundle.
+      continue;
+    }
+    const hit = Array.isArray(doc?.data) ? doc.data[0] : undefined;
+    if (hit) return flattenJsonApiNode(hit);
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Handler factory
 // ---------------------------------------------------------------------------
 
@@ -106,9 +239,27 @@ export function createDrupalPrimitiveHandlers() {
       const input = nodeGetSchema.parse(request.input);
       const instance = await resolveInstance(input.instanceId);
       const nid = parseInt(input.nodeId, 10);
+      // Validation must throw BEFORE any read so a bad nodeId never silently
+      // falls back to a summary lookup (codex must-fix).
       if (!Number.isFinite(nid) || nid <= 0) {
         throw new Error(`Invalid nodeId: "${input.nodeId}" is not a positive integer`);
       }
+
+      // PRIMARY — full-field JSON:API read. This is the field-level-diff fix:
+      // the agent's STEP 1 needs the editable `body`/`title`/`summary`
+      // before-values (which the recent-content summary row lacks) so STEP 4
+      // can emit a real before/after change set like the WordPress agent.
+      try {
+        const node = await readNodeViaJsonApi(instance, nid);
+        if (node) return node;
+        // JSON:API reachable but node absent — fall through to the summary
+        // lookup, which also covers nodes the JSON:API access policy hides.
+      } catch {
+        // JSON:API unavailable (module disabled / restricted / transient).
+        // Fall back to the recent-content summary so the read never regresses.
+      }
+
+      // FALLBACK — recent-content summary lookup (the pre-fix behavior).
       // mcp_tools_search_content requires ≥3 chars and does full-text search,
       // not nid lookup; single/two-digit node IDs always fail it. Use
       // mcp_tools_get_recent_content instead.
@@ -128,7 +279,7 @@ export function createDrupalPrimitiveHandlers() {
       });
       if (!node) {
         throw new Error(
-          `Node ${nid} not found in recent 100 nodes via mcp_tools_get_recent_content`,
+          `Node ${nid} not found via JSON:API or in recent 100 nodes via mcp_tools_get_recent_content`,
         );
       }
       return node;
