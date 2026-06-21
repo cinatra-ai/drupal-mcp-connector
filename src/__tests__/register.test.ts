@@ -112,6 +112,41 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
     expect(sentinel).not.toHaveBeenCalled();
   });
 
+  it("requireInstanceWriteAuthority binds the host instance-write-authority service for KIND 'drupal' and forwards only instanceId+primitiveName (cinatra#409)", async () => {
+    const requireWrite = vi.fn(async () => {});
+    const selectForConnector = vi.fn((_kind: string) => ({ requireWrite }));
+    activateWithServices({
+      // The REAL host capability id + shape (HostInstanceWriteAuthorityService):
+      // selectForConnector(kind).requireWrite({ instanceId, primitiveName }).
+      "@cinatra-ai/host:instance-write-authority": { selectForConnector },
+    });
+    await expect(
+      getDrupalDeps().requireInstanceWriteAuthority({
+        instanceId: "site-1",
+        primitiveName: "drupal_node_update",
+      }),
+    ).resolves.toBeUndefined();
+    // The connector names ONLY its own static kind — never a package id.
+    expect(selectForConnector).toHaveBeenCalledWith("drupal");
+    // It forwards ONLY the non-identity coordinates; the host derives the
+    // trusted actor itself (never from the connector).
+    expect(requireWrite).toHaveBeenCalledWith({
+      instanceId: "site-1",
+      primitiveName: "drupal_node_update",
+    });
+  });
+
+  it("requireInstanceWriteAuthority FAILS LOUD on an old host that did not publish the instance-write-authority service (cinatra#409 fail-closed)", async () => {
+    // No @cinatra-ai/host:instance-write-authority provider registered.
+    activateWithServices({});
+    await expect(
+      getDrupalDeps().requireInstanceWriteAuthority({
+        instanceId: "site-1",
+        primitiveName: "drupal_node_update",
+      }),
+    ).rejects.toThrow(/host service "@cinatra-ai\/host:instance-write-authority" is not registered/);
+  });
+
   it("nango members delegate to the connector-authored nango-system surface", async () => {
     const isNangoConfigured = vi.fn(() => true);
     const buildBearerAuthHeaderFromNango = vi.fn(async () => ({ Authorization: "Bearer t" }));

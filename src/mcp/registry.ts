@@ -89,6 +89,14 @@ export function registerDrupalPrimitives(server: ExtensionMcpToolServer): void {
         const result = await handler({
           primitiveName: name,
           input,
+          // cinatra#409: this synthetic literal is NO LONGER an authorization
+          // input. Write authz is enforced inside the handler via the host dep
+          // `requireInstanceWriteAuthority`, which derives the trusted user
+          // actor host-side from the active MCP request frame
+          // (mcpRequestContextStorage) — NEVER from this field or from tool
+          // input. `request.actor` is typed `unknown` by the SDK and is kept
+          // here only to satisfy the ExtensionPrimitiveRequest shape; nothing
+          // in the handlers reads it for an authorization decision.
           actor: { actorType: "model", source: "agent" },
           mode: "agentic",
         });

@@ -47,6 +47,23 @@ type HostDrupalMcpShape = {
   deleteInstance: DrupalConnectorDeps["deleteInstance"];
   getInstanceStatuses: DrupalConnectorDeps["listInstanceStatuses"];
 };
+// cinatra#409 — per-user / per-connector-instance write-authority host service
+// (`HostInstanceWriteAuthorityService`, capability id below). The host binds an
+// impl that derives the trusted actor from the active MCP request frame
+// (mcpRequestContextStorage), DENIES fail-closed when no userId+orgId resolve,
+// then enforces (1) PER-INSTANCE org-binding == the trusted actor's org (so a
+// forged/cross-org instanceId is denied) and (2) the connector-package
+// requireConnectorAuthority policy. `selectForConnector(kind)` maps the
+// connector KIND to BOTH the package id and the instance reader HOST-SIDE — the
+// connector names only its OWN static kind ("drupal"), never a package id or
+// another caller-chosen selector. `requireWrite` resolves void on allow / throws
+// on deny. The connector forwards only instanceId+primitiveName; identity is
+// NEVER connector-supplied.
+type HostInstanceWriteAuthorityShape = {
+  selectForConnector(kind: string): {
+    requireWrite: (input: { instanceId: string; primitiveName: string; sourceType?: string }) => Promise<void>;
+  };
+};
 
 /** Lazy per-concern host-service resolution (fail-loud on a missing service —
  * the host boot wiring publishes these before any connector call runs). */
@@ -83,6 +100,10 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): DrupalConnectorDeps {
   const contentEditor = () =>
     hostService<HostContentEditorDispatchShape>(ctx, "@cinatra-ai/host:content-editor-dispatch");
   const drupalMcp = () => hostService<HostDrupalMcpShape>(ctx, "@cinatra-ai/host:drupal-mcp");
+  // cinatra#409 — resolved lazily at call time; fail-loud if the host did not
+  // publish it (an old host) so the writer denies rather than writes unguarded.
+  const writeAuthority = () =>
+    hostService<HostInstanceWriteAuthorityShape>(ctx, "@cinatra-ai/host:instance-write-authority");
   const nango = () => nangoSystem(ctx);
   return {
     decodeCursor: (cursor) => pagination().decodeCursor(cursor),
@@ -103,6 +124,16 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): DrupalConnectorDeps {
     saveInstance: (input) => drupalMcp().saveInstance(input),
     deleteInstance: (id) => drupalMcp().deleteInstance(id),
     listInstanceStatuses: () => drupalMcp().getInstanceStatuses(),
+    // cinatra#409 — per-user write authorization. Binds to the connector's OWN
+    // static KIND ("drupal") — the host maps it to BOTH the package id and the
+    // instance reader; the connector forwards only instanceId+primitiveName, and
+    // the host impl derives the trusted actor from the MCP request frame and
+    // throws on deny / null actor (fail-closed). If the host service is absent
+    // (old host), hostService() throws → here the throw surfaces as a REJECTED
+    // promise (async member) so the awaiting writer denies (never writes
+    // unguarded), the same as a real deny.
+    requireInstanceWriteAuthority: async (input) =>
+      writeAuthority().selectForConnector("drupal").requireWrite(input),
   };
 }
 

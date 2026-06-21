@@ -46,6 +46,8 @@ beforeEach(() => {
     saveInstance: vi.fn(),
     deleteInstance: vi.fn(),
     listInstanceStatuses: vi.fn(async () => []),
+    // cinatra#409 — write-authority gate (unused by this suite; allow stub).
+    requireInstanceWriteAuthority: vi.fn(async () => {}),
   });
 });
 

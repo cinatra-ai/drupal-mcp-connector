@@ -13,6 +13,10 @@ import { createDrupalPrimitiveHandlers } from "@cinatra-ai/drupal-mcp-connector/
 // Deps-slot member mocks for the host-bound instance-admin surface.
 const listMcpInstancesMock = vi.fn((): any[] => []);
 const getApiStatusMock = vi.fn(async () => ({ instanceCount: 0, instances: [] as any[] }));
+// cinatra#409 — per-user write-authority gate mock. Default = ALLOW (resolves)
+// so the pre-existing write happy-path tests keep their original behavior; the
+// dedicated authz suite (write-authority.test.ts) overrides it to DENY (throw).
+const requireInstanceWriteAuthorityMock = vi.fn(async (_input: { instanceId: string; primitiveName: string }) => {});
 
 function registerHandlersDepsStub() {
   registerDrupalConnector({
@@ -33,6 +37,7 @@ function registerHandlersDepsStub() {
     saveInstance: vi.fn(),
     deleteInstance: vi.fn(),
     listInstanceStatuses: vi.fn(async () => []),
+    requireInstanceWriteAuthority: requireInstanceWriteAuthorityMock,
   });
 }
 
@@ -79,6 +84,9 @@ describe("createDrupalPrimitiveHandlers", () => {
     listMcpInstancesMock.mockReset();
     listMcpInstancesMock.mockReturnValue([]);
     getApiStatusMock.mockClear();
+    // Reset the write-authority gate to its default ALLOW behavior each test.
+    requireInstanceWriteAuthorityMock.mockReset();
+    requireInstanceWriteAuthorityMock.mockResolvedValue(undefined);
     vi.mocked(callDrupalMcp).mockReset();
     fetchMock.mockReset();
     originalFetch = globalThis.fetch;
@@ -558,6 +566,10 @@ function registerContentEditorDepsStub() {
     saveInstance: vi.fn(),
     deleteInstance: vi.fn(),
     listInstanceStatuses: vi.fn(async () => []),
+    // cinatra#409 — the content-editor RELAY is a dispatch primitive (it does
+    // not call callDrupalMcp directly); the write authz runs in the leaf
+    // agent's own MCP write tools. Stubbed allow here for contract completeness.
+    requireInstanceWriteAuthority: vi.fn(async () => {}),
   });
 }
 

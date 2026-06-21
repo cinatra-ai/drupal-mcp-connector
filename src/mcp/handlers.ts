@@ -101,6 +101,35 @@ async function resolveInstance(instanceId: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-user / per-connector-instance write authorization (cinatra#409).
+//
+// EVERY write primitive calls this AFTER resolving the instance and BEFORE
+// dispatching the write to callDrupalMcp. The host dep derives the trusted user
+// actor from the active MCP request frame (NEVER from connector tool input),
+// denies a null actor (no userId+orgId), and enforces the user's per-instance
+// `use` entitlement via requireConnectorAuthority — throwing on deny.
+//
+// FAIL-CLOSED: the registry passes only an SDK-shape `actor` literal that is NO
+// LONGER an authz input (the SDK types `request.actor` as `unknown`). If the
+// host is old / skewed and the dep is unbound (or not a function), this guard
+// THROWS rather than letting the write proceed under a synthetic/anonymous
+// actor — the write path is deny-by-default when authorization cannot run.
+async function requireWriteAuthority(instanceId: string, primitiveName: string): Promise<void> {
+  const deps = getDrupalDeps();
+  const gate = deps.requireInstanceWriteAuthority;
+  if (typeof gate !== "function") {
+    // Unbound on an old/partial host: deny — never write without the gate.
+    throw new Error(
+      `Drupal write "${primitiveName}" denied: per-user write-authority gate is unavailable ` +
+        "(host requireInstanceWriteAuthority unbound). Refusing to write without authorization.",
+    );
+  }
+  // Throws on deny (non-member / member-without-right / null actor / cross-org
+  // instance / platform-admin on the widget path). Resolving == authorized.
+  await gate({ instanceId, primitiveName });
+}
+
+// ---------------------------------------------------------------------------
 // JSON:API full-field read (the field-level-diff fix).
 //
 // The content-editor agent's STEP 1 must see the editable before-values
@@ -288,6 +317,9 @@ export function createDrupalPrimitiveHandlers() {
     drupal_node_update: async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = nodeUpdateSchema.parse(request.input);
       const instance = await resolveInstance(input.instanceId);
+      // cinatra#409 — per-user / per-instance write authorization (fail-closed).
+      // Throws on deny BEFORE any write reaches the Drupal site.
+      await requireWriteAuthority(input.instanceId, "drupal_node_update");
       // mcp_update_content — pass nid as string to avoid PHP strtolower() type error
       // in drupal/mcp_tools ^1.0 which calls strtolower() on the nid field expecting a string.
       const nid = parseInt(input.nodeId, 10);
@@ -325,6 +357,8 @@ export function createDrupalPrimitiveHandlers() {
     drupal_node_create_draft_revision: async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = nodeCreateDraftSchema.parse(request.input);
       const instance = await resolveInstance(input.instanceId);
+      // cinatra#409 — per-user / per-instance write authorization (fail-closed).
+      await requireWriteAuthority(input.instanceId, "drupal_node_create_draft_revision");
       // Strip empty-string fields. Same threat class as drupal_node_update:
       // an LLM emitting `{ body: "" }` would otherwise create a draft with an
       // empty body. Strict equality on "" only; null/false/0 pass through.
@@ -371,6 +405,8 @@ export function createDrupalPrimitiveHandlers() {
     drupal_node_publish: async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = nodeGetSchema.parse(request.input);
       const instance = await resolveInstance(input.instanceId);
+      // cinatra#409 — per-user / per-instance write authorization (fail-closed).
+      await requireWriteAuthority(input.instanceId, "drupal_node_publish");
       // mcp_publish_content — pass nid as string (same strtolower() fix as drupal_node_update)
       const nid = parseInt(input.nodeId, 10);
       if (!Number.isFinite(nid) || nid <= 0) {
