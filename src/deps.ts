@@ -116,6 +116,28 @@ export type DrupalMcpInstanceStatus = {
   isPrivate: boolean;
 };
 
+/**
+ * Per-user / per-connector-instance write-authority gate input (cinatra#409).
+ *
+ * The handler passes ONLY the non-identity coordinates of the write: which
+ * `instanceId` the write targets and which `primitiveName` is being invoked.
+ * The CALLER IDENTITY IS NEVER PASSED HERE — the host implementation derives the
+ * trusted actor (`userId`/subject = the carrier run's `runBy`, `orgId`,
+ * `orgRole`, `platformRole`, `sourceType`) host-side from the active MCP request
+ * frame (`mcpRequestContextStorage` via `extension-host-actor.ts`), so a
+ * connector can never assert or forge identity through tool input.
+ */
+export type RequireInstanceWriteAuthorityInput = {
+  /** The instance the write targets (the tool INPUT argument naming WHICH
+   * instance). The host checks the trusted user holds the required `use` right
+   * ON THIS instance via `requireConnectorAuthority(<pkg>, actor, {mode:"use",
+   * instanceId})`; `enforceConnectorPolicy` keys on `actor.organizationId`, so a
+   * different-org instance denies (no grant for that org's verified actor). */
+  instanceId: string;
+  /** The write primitive name, for the audit row only (never an authz input). */
+  primitiveName: string;
+};
+
 export interface DrupalConnectorDeps {
   decodeCursor: (cursor?: string) => number;
   buildListPage: <T>(items: T[], total: number, offset: number, limit: number) => ListPage<T>;
@@ -151,6 +173,33 @@ export interface DrupalConnectorDeps {
   deleteInstance: (id: string) => Promise<void>;
   /** Per-instance MCP reachability statuses (host probe + Nango bearer). */
   listInstanceStatuses: () => Promise<DrupalMcpInstanceStatus[]>;
+  // ---- per-user write-authority gate (cinatra#409; host-bound) ----
+  /**
+   * WRITE AUTHZ — per-user / per-connector-instance entitlement gate. EVERY
+   * Drupal write primitive (`drupal_node_update`,
+   * `drupal_node_create_draft_revision`, `drupal_node_publish`) MUST `await`
+   * this BEFORE dispatching the write to `callDrupalMcp`. It THROWS on deny;
+   * resolving without throwing is the only "allow".
+   *
+   * Host-side the impl: (a) resolves the trusted actor from the active MCP
+   * request frame (`resolveExtensionActorContext()` / `resolveExtensionActorSummary()`
+   * — NEVER from connector tool input); (b) DENIES (throws) if it cannot resolve
+   * a `userId`+`orgId` (null actor → fail-closed, no synthetic/anonymous write);
+   * (c) calls `requireConnectorAuthority("@cinatra-ai/drupal-mcp-connector",
+   * actor, {mode:"use", instanceId})` and throws on deny; (d) for the
+   * `public_site_widget` source the platform-admin bypass is NOT honored
+   * (already true post-#408 because `resolveAgentRunMcpActor` suppresses
+   * platform_admin on that path); (e) emits the per-decision audit row.
+   *
+   * FAIL-CLOSED CONTRACT: this dep is the handler's only authorization. If it is
+   * UNBOUND on an old host (`getDrupalDeps().requireInstanceWriteAuthority`
+   * absent) the writer MUST throw rather than write — see the handler guards. It
+   * is declared REQUIRED here; the handler additionally guards `typeof !==
+   * "function"` defensively so a skewed/partial binding still fails closed.
+   */
+  requireInstanceWriteAuthority: (
+    input: RequireInstanceWriteAuthorityInput,
+  ) => Promise<void>;
 }
 
 const DRUPAL_DEPS_KEY = Symbol.for("@cinatra-ai/drupal-mcp-connector:host-deps/v1");
