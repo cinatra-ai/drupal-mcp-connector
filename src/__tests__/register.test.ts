@@ -52,6 +52,59 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
     expect(listInstances).toHaveBeenCalledTimes(1);
   });
 
+  it("wires the actor-scoped lister against a post-cutover host AND fails closed against a pre-cutover host", async () => {
+    // Post-cutover host: drupal-mcp service publishes `listAuthorizedInstances`.
+    const authorized = [
+      {
+        id: "a",
+        name: "Site a",
+        siteUrl: "https://a.example",
+        nangoConnectionId: "a",
+        providerConfigKey: "cinatra-drupal",
+      },
+    ];
+    const listAuthorizedInstances = vi.fn(async () => authorized);
+    const listInstances = vi.fn(() => [
+      ...authorized,
+      {
+        id: "foreign",
+        name: "Foreign",
+        siteUrl: "https://foreign.example",
+        nangoConnectionId: "foreign",
+        providerConfigKey: "cinatra-drupal",
+      },
+    ]);
+    activateWithServices({
+      "@cinatra-ai/host:drupal-mcp": {
+        listInstances,
+        listAuthorizedInstances,
+        probe: vi.fn(),
+        resolveServerUrl: vi.fn(),
+        isPrivateUrl: vi.fn(),
+      },
+    });
+    const lister = getDrupalDeps().listAuthorizedMcpInstances!;
+    await expect(lister()).resolves.toEqual(authorized);
+    expect(listAuthorizedInstances).toHaveBeenCalledTimes(1);
+    // The actor-scoped lister NEVER consults the global unscoped listInstances.
+    expect(listInstances).not.toHaveBeenCalled();
+
+    // Pre-cutover host: `listAuthorizedInstances` ABSENT → the dep fails closed
+    // (returns []) at call time, NEVER falling back to the global listInstances.
+    _resetDrupalDepsForTests();
+    const legacyListInstances = vi.fn(() => authorized);
+    activateWithServices({
+      "@cinatra-ai/host:drupal-mcp": {
+        listInstances: legacyListInstances,
+        probe: vi.fn(),
+        resolveServerUrl: vi.fn(),
+        isPrivateUrl: vi.fn(),
+      },
+    });
+    await expect(getDrupalDeps().listAuthorizedMcpInstances!()).resolves.toEqual([]);
+    expect(legacyListInstances).not.toHaveBeenCalled();
+  });
+
   it("binds the instance-admin members LAZILY against the extended drupal-mcp service (cinatra#172 Stage H2)", async () => {
     const getAPIStatus = vi.fn(async () => ({ instanceCount: 0, instances: [] }));
     const saveInstance = vi.fn(async (input: unknown) => ({ id: "i-1", echoed: input }));
