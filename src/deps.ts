@@ -148,8 +148,46 @@ export interface DrupalConnectorDeps {
     input: DrupalNangoBearerHeaderInput,
   ) => Promise<{ Authorization: string } | null>;
   // ---- external-MCP toolbox surfaces (host-bound; consumed by src/mcp/toolbox.ts) ----
-  /** Configured Drupal instances (host `@/lib/drupal-api` settings). */
+  /**
+   * ALL configured Drupal instances (host `@/lib/drupal-api` settings) — the
+   * GLOBAL, UNSCOPED list. This is NOT actor-aware: it carries every tenant's
+   * instance rows. It is safe ONLY for the in-process MCP primitive handlers,
+   * where the per-user / per-instance authorization gate
+   * (`requireInstanceWriteAuthority`) runs host-side on the trusted MCP request
+   * frame BEFORE any write. The external-MCP toolbox-injection path
+   * (`src/mcp/toolbox.ts`) MUST NOT use this — it would inject another tenant's
+   * credential-bearing MCP server into an LLM call with no actor check
+   * (confused-deputy authz bypass). The toolbox uses `listAuthorizedMcpInstances` instead.
+   */
   listMcpInstances: () => DrupalMcpInstance[];
+  /**
+   * ACTOR-SCOPED instance list for the external-MCP toolbox-injection path.
+   * Returns ONLY the Drupal instances the TRUSTED requesting actor's org is
+   * entitled to `use`.
+   *
+   * AUTHORIZATION-AT-THE-CREDENTIAL-BOUNDARY: the toolbox builds a per-instance
+   * Nango bearer header (another tenant's credential) and injects each reachable
+   * instance as an always-available external MCP server for an LLM call. The
+   * actor filter MUST therefore run BEFORE any bearer header is built, so no
+   * credential for a non-entitled tenant is ever resolved or exposed. Approval
+   * is NOT authorization — this enforces org OWNERSHIP at the list/read boundary,
+   * not merely at exposure.
+   *
+   * IDENTITY IS HOST-DERIVED ONLY: like `requireInstanceWriteAuthority`, the host
+   * implementation resolves the trusted actor (`userId`/`orgId`/`platformRole`)
+   * from the active MCP/llm request frame (`resolveExtensionActorContext()` —
+   * NEVER from connector input or the SDK `request.actor` field), then returns
+   * the subset of `listMcpInstances()` whose persisted org binding (cinatra#274)
+   * matches the actor's org AND for which the actor holds the connector `use`
+   * right (`requireConnectorAuthority(..., {mode:"use", instanceId})`).
+   *
+   * FAIL-CLOSED CONTRACT: when NO trusted actor resolves (null `userId`/`orgId` —
+   * e.g. an unauthenticated/legacy call frame), the host impl returns `[]` (NO
+   * tools injected), never the global list. The toolbox additionally treats this
+   * dep being UNBOUND or not-a-function (old/skewed host) as deny — it injects
+   * nothing rather than fall back to the unscoped `listMcpInstances`.
+   */
+  listAuthorizedMcpInstances?: () => Promise<DrupalMcpInstance[]>;
   /** Cached reachability probe of an instance's MCP endpoint (host-bound). */
   probeMcp: (siteUrl: string, authHeader: string) => Promise<DrupalMcpProbeStatus>;
   /** Canonical MCP endpoint URL for a site (host owns the route constant). */

@@ -37,6 +37,14 @@ type HostContentEditorDispatchShape = {
 };
 type HostDrupalMcpShape = {
   listInstances: DrupalConnectorDeps["listMcpInstances"];
+  // ACTOR-SCOPED instance lister. OPTIONAL on the host service shape so this
+  // connector compiles + activates against BOTH a pre-cutover host (member absent
+  // → external-MCP toolbox fails closed: no tools) and a post-cutover host that
+  // publishes the trusted-actor-scoped impl. The host
+  // resolves the trusted actor from the MCP request frame (NEVER connector
+  // input), returns ONLY the actor's org-entitled instances, and returns []
+  // fail-closed when no actor resolves.
+  listAuthorizedInstances?: NonNullable<DrupalConnectorDeps["listAuthorizedMcpInstances"]>;
   probe: DrupalConnectorDeps["probeMcp"];
   resolveServerUrl: DrupalConnectorDeps["resolveMcpServerUrl"];
   isPrivateUrl: DrupalConnectorDeps["isPrivateUrl"];
@@ -112,6 +120,20 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): DrupalConnectorDeps {
     dispatchContentEditor: (input) => contentEditor().dispatch(input),
     buildNangoBearerHeader: (input) => nango().buildBearerAuthHeaderFromNango(input),
     listMcpInstances: () => drupalMcp().listInstances(),
+    // Actor-scoped instance lister for the
+    // external-MCP toolbox-injection path. ALWAYS bound to a LAZY function (no
+    // host resolution at construction — preserves the probe-safe no-I/O
+    // invariant); at CALL time it resolves the host service and forwards to
+    // `listAuthorizedInstances` IF the host publishes it (post-#321 host),
+    // otherwise FAILS CLOSED by returning [] (pre-#321 host) — the toolbox then
+    // injects no tools and NEVER falls back to the unscoped `listInstances`. The
+    // host impl derives the trusted actor from the MCP request frame and applies
+    // the same org/entitlement gate as the write-authority service.
+    listAuthorizedMcpInstances: async () => {
+      const svc = drupalMcp();
+      if (typeof svc.listAuthorizedInstances !== "function") return [];
+      return svc.listAuthorizedInstances();
+    },
     probeMcp: (siteUrl, authHeader) => drupalMcp().probe(siteUrl, authHeader),
     resolveMcpServerUrl: (siteUrl) => drupalMcp().resolveServerUrl(siteUrl),
     isPrivateUrl: (url) => drupalMcp().isPrivateUrl(url),
