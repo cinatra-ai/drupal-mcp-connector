@@ -3,6 +3,7 @@ import "server-only";
 import type { Metadata } from "next";
 import { revalidatePath } from "next/cache";
 
+import Link from "next/link";
 import { Button } from "./components/ui/button";
 import { LinkIcon } from "lucide-react";
 import { Input } from "./components/ui/input";
@@ -67,7 +68,15 @@ export async function DrupalSettingsPage({ ctx }: { ctx: ExtensionHostContext })
         <PageContent className="flex flex-col gap-6 pb-8">
           <Alert variant="warning" className="rounded-control">
             <AlertDescription>
-              Nango is not configured — the Drupal connector is disabled. Configure it at <a className="underline" href="/configuration/llm/nango">/configuration/llm/nango</a> first.
+              Nango is not configured — the Drupal connector is disabled. Configure it at{" "}
+              <Button
+                asChild
+                variant="link"
+                className="h-auto p-0 align-baseline underline"
+              >
+                <Link href="/configuration/llm/nango">/configuration/llm/nango</Link>
+              </Button>{" "}
+              first.
             </AlertDescription>
           </Alert>
         </PageContent>
@@ -179,7 +188,7 @@ export async function DrupalSettingsPage({ ctx }: { ctx: ExtensionHostContext })
                       </span>
                     </div>
                     <form action={deleteInstanceAction}>
-                      <input type="hidden" name="id" value={instance.id} />
+                      <Input type="hidden" name="id" value={instance.id} />
                       <Button type="submit" variant="outline" size="sm">
                         Delete
                       </Button>
