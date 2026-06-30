@@ -52,6 +52,7 @@
   "cinatra": {
     "apiVersion": "cinatra.ai/v1",
     "kind": "connector",
+    "sdkAbiRange": "^2",
     "vendor": {
       "key": "cinatra-ai",
       "name": "Cinatra"
