@@ -7,6 +7,26 @@ import { callDrupalMcp } from "../lib/drupal-mcp-client";
 // resolved via DI so this package carries no non-SDK `@cinatra-ai/*` code
 // dependency and no `@/` host-internal edge.
 import { getDrupalDeps, listMcpInstancesSorted } from "../deps";
+import type { DrupalMcpInstance, DrupalMcpPublicInstance } from "../deps";
+
+// READ-BOUNDARY redaction. A read/list primitive must NEVER emit the Nango
+// credential binding. This projection drops `nangoConnectionId` +
+// `providerConfigKey` (the vault slot a caller could use to reach the site's
+// stored credential) and returns only non-secret display fields. Mirrors the
+// WordPress sibling's `toPublicInstance`. Write/dispatch primitives are
+// unaffected — they re-resolve the FULL row via `listMcpInstancesSorted()` and
+// thread it host-side, where the binding is used to fetch the credential;
+// callers never receive it.
+function toPublicInstance(i: DrupalMcpInstance): DrupalMcpPublicInstance {
+  return {
+    id: i.id,
+    name: i.name,
+    siteUrl: i.siteUrl,
+    lastValidatedAt: i.lastValidatedAt,
+    createdAt: i.createdAt,
+    updatedAt: i.updatedAt,
+  };
+}
 
 // Strip Markdown code fences from LLM-emitted JSON before parse. The
 // wayflow-drupal-content-editor agent's LLM occasionally wraps its JSON output
@@ -256,12 +276,10 @@ export function createDrupalPrimitiveHandlers() {
     },
 
     drupal_instances_list: async (_request: ExtensionPrimitiveRequest<unknown>) => {
-      const instances = listMcpInstancesSorted();
-      // Credentials live only in the Nango vault and are resolved at call time
-      // via callDrupalMcp / the external-MCP toolbox. The instance row exposes
-      // name/siteUrl + nangoConnectionId/providerConfigKey, with no secret
-      // material, so no further stripping is needed.
-      return instances;
+      // Redact the Nango credential binding at the read boundary: the LLM tool
+      // caller receives only id/name/siteUrl/timestamps, never
+      // nangoConnectionId/providerConfigKey (see toPublicInstance).
+      return listMcpInstancesSorted().map(toPublicInstance);
     },
 
     drupal_node_get: async (request: ExtensionPrimitiveRequest<unknown>) => {
