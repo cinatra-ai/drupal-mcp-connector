@@ -30,5 +30,5 @@ jobs:
     # frozen to its commit SHA; the v0.0.0-main.<sha> pre-release comment keeps
     # the org actions-pinned-gate's `# vX.Y.Z` contract satisfied until that
     # repo cuts a real tag.
-    uses: cinatra-ai/.github/.github/workflows/reusable-extension-release.yml@fea09b38e94c0a64f7fab3c02d34b0fe1ecf746d # v0.1.0
+    uses: cinatra-ai/.github/.github/workflows/reusable-extension-release.yml@1e4448a75dc27b7be4d52ac3ce0734fa7c766957 # v0.1.1
     secrets: inherit
