@@ -131,7 +131,7 @@ describe("createDrupalPrimitiveHandlers", () => {
     expect(result.map((i) => i.id)).toEqual(["new", "old"]);
   });
 
-  it("drupal_instances_list returns the configured instances with no credential-bearing field", async () => {
+  it("drupal_instances_list redacts the Nango credential binding at the read boundary", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "a" }), inst({ id: "b" })]);
     const result = (await (handlers as any).drupal_instances_list({
       primitiveName: "drupal_instances_list",
@@ -141,11 +141,20 @@ describe("createDrupalPrimitiveHandlers", () => {
     })) as any;
     expect(Array.isArray(result)).toBe(true);
     expect(result).toHaveLength(2);
-    // No secret is stored in the row at all. nangoConnectionId is a pointer,
-    // not a credential, and is safe to expose.
+    // The LLM tool caller must NEVER receive the credential binding: the vault
+    // slot (nangoConnectionId/providerConfigKey) is what a caller could use to
+    // reach the site's stored credential.
+    expect(result[0].nangoConnectionId).toBeUndefined();
+    expect(result[0].providerConfigKey).toBeUndefined();
     expect(result[0].mcpApiKey).toBeUndefined();
-    expect(result[0].nangoConnectionId).toBe("a");
-    expect(result[0].providerConfigKey).toBe("cinatra-drupal");
+    // Non-secret display fields are preserved.
+    expect(result[0].id).toBe("a");
+    expect(result[0].name).toBe("Site 1");
+    expect(result[0].siteUrl).toBe("http://localhost:8082");
+    expect(result[0].createdAt).toBe("2026-01-01T00:00:00Z");
+    // Belt-and-braces: no key on any row carries the binding, so a JSON.stringify
+    // of the tool result (what the registry emits to the LLM) cannot leak it.
+    expect(JSON.stringify(result)).not.toMatch(/nangoConnectionId|providerConfigKey/);
   });
 
   it("drupal_node_get throws when instanceId not found", async () => {

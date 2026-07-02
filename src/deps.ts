@@ -88,6 +88,26 @@ export type DrupalMcpInstance = {
   updatedAt?: string;
 };
 
+/**
+ * Public (redacted) projection of a Drupal instance for READ/LIST primitives.
+ * NEVER carries the Nango credential binding (`nangoConnectionId` /
+ * `providerConfigKey`) — those name the vault slot a caller could use to reach
+ * the site's stored credential, so read-capable callers (incl. LLM tool paths)
+ * must never receive them. The `drupal_instances_list` read handler returns
+ * this shape; write/dispatch primitives keep resolving the FULL
+ * `DrupalMcpInstance` row host-side (credentials are read at call time via
+ * callDrupalMcp / the external-MCP toolbox). Mirrors the WordPress sibling's
+ * `WordPressMcpPublicInstance`.
+ */
+export type DrupalMcpPublicInstance = {
+  id: string;
+  name: string;
+  siteUrl: string;
+  lastValidatedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
 /** Probe verdict for a Drupal `drupal/mcp_tools` endpoint (host-bound probe). */
 export type DrupalMcpProbeStatus = "registered" | "not_installed" | "auth_error" | "unreachable";
 
