@@ -1,0 +1,15 @@
+{
+  "server": {
+    "transport": "http",
+    "baseUrl": "${CINATRA_BASE_URL:-http://localhost:3000}/api/mcp"
+  },
+  "primitives": [
+    "drupal_status",
+    "drupal_instances_list",
+    "drupal_node_get",
+    "drupal_node_update",
+    "drupal_node_create_draft_revision",
+    "drupal_node_list",
+    "drupal_node_publish"
+  ]
+}
