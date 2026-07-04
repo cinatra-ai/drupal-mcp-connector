@@ -18,7 +18,8 @@
     "./mcp-handlers": "./src/mcp/handlers.ts",
     "./mcp-toolbox": "./src/mcp/toolbox.ts",
     "./mcp-module": "./src/mcp/module.ts",
-    "./widget-chat-tool": "./src/widget-chat-tool.ts"
+    "./widget-chat-tool": "./src/widget-chat-tool.ts",
+    "./src/webhooks/node-published": "./src/webhooks/node-published.ts"
   },
   "scripts": {
     "test": "vitest",
@@ -65,6 +66,17 @@
       "capabilities"
     ],
     "dependencies": [],
+    "webhooks": {
+      "hooks": [
+        {
+          "id": "node-published",
+          "handler": "./src/webhooks/node-published",
+          "factory": "createNodePublishedHandler",
+          "label": "Node published",
+          "schemaVersion": 1
+        }
+      ]
+    },
     "widgetStream": {
       "agentSlug": "drupal-content-editor",
       "relayAgentPackage": "@cinatra-ai/drupal-agent",
