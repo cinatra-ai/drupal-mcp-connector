@@ -5,6 +5,7 @@
   "files": [
     "src",
     "cinatra",
+    "skills",
     "!src/__tests__/"
   ],
   "type": "module",
@@ -66,6 +67,9 @@
       "capabilities"
     ],
     "dependencies": [],
+    "capabilities": {
+      "widget-chat.drupal-content-editor": "drupal-widget-chat"
+    },
     "webhooks": {
       "hooks": [
         {

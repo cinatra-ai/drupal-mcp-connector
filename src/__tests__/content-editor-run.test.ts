@@ -10,7 +10,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 //   2. empty text          -> returns { result: "" }                  (graceful fallback)
 //   3. fenced JSON         -> stripCodeFences -> returns { nodeId, changes }
 //   4. non-JSON prose      -> returns { result: "Edit complete." }
-//   5. dispatch is invoked with the serialized input + default agentUrl + 300s
+//   5. dispatch is invoked with the validated input object + default agentUrl + 300s
 
 // No `@/lib/drupal-api` mock: the handlers graph carries no host-internal
 // import since the instance-admin deps cutover (cinatra#172 Stage H2) — the
@@ -26,7 +26,7 @@ import {
 } from "../deps";
 
 const dispatchMock = vi.fn(
-  async (_input: { agentUrl: string; payload: string; timeoutMs: number }) => "",
+  async (_input: { agentUrl: string; payload: unknown; timeoutMs: number }) => "",
 );
 
 function registerDepsStub() {
@@ -117,7 +117,7 @@ describe("drupal_content_editor_run - reply-text handling", () => {
     expect(result).toEqual({ result: "Edit complete." });
   });
 
-  it("Test 5: dispatches the serialized input with the default agentUrl + 300s budget", async () => {
+  it("Test 5: dispatches the validated input object with the default agentUrl + 300s budget", async () => {
     dispatchMock.mockResolvedValue('{"nodeId":"42","changes":[]}');
     await (handlers as any).drupal_content_editor_run({
       primitiveName: "drupal_content_editor_run",
@@ -128,13 +128,12 @@ describe("drupal_content_editor_run - reply-text handling", () => {
     expect(dispatchMock).toHaveBeenCalledTimes(1);
     const arg = dispatchMock.mock.calls[0][0] as {
       agentUrl: string;
-      payload: string;
+      payload: { instanceId: string; nodeId: string };
       timeoutMs: number;
     };
     expect(arg.agentUrl).toBe("http://localhost:3010/agents/cinatra-ai/drupal-agent");
     expect(arg.timeoutMs).toBe(300_000);
-    const payload = JSON.parse(arg.payload);
-    expect(payload.instanceId).toBe("site-1");
-    expect(payload.nodeId).toBe("42");
+    expect(arg.payload.instanceId).toBe("site-1");
+    expect(arg.payload.nodeId).toBe("42");
   });
 });

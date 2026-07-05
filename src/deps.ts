@@ -43,8 +43,14 @@ type ListPage<T> = { items: T[]; total: number; nextCursor?: string };
 export type DrupalDispatchContentEditorInput = {
   /** Resolved A2A endpoint for the wayflow-drupal-content-editor agent. */
   agentUrl: string;
-  /** Serialized input envelope (the connector passes `JSON.stringify(input)`). */
-  payload: string;
+  /**
+   * Opaque JSON-serializable payload forwarded as the A2A message text. The
+   * connector passes the validated `input` OBJECT; the host serializes it when
+   * it builds the A2A task text. SAME shape as the WordPress connector's seam
+   * (#72 content-editor payload-contract parity) so the host binds ONE shared
+   * helper for both.
+   */
+  payload: unknown;
   /** Blocking budget in ms (the connector passes 300_000 to align with /chat). */
   timeoutMs: number;
   /**
