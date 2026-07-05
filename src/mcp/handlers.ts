@@ -455,7 +455,10 @@ export function createDrupalPrimitiveHandlers() {
 
       const text = await getDrupalDeps().dispatchContentEditor({
         agentUrl: a2aUrl,
-        payload: JSON.stringify(input),
+        // #72 payload-contract parity: pass the validated `input` OBJECT (the
+        // host serializes it as the A2A message text), matching the WordPress
+        // connector's shape so ONE shared host helper serves both.
+        payload: input,
         timeoutMs: 300_000, // aligned with /chat blocking budget
         // cinatra#246: lets the host resolve the agent template + pre-create the
         // OBO agent_run so the CMS write authorizes via the production agent-run

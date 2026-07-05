@@ -26,13 +26,14 @@ import {
 } from "../deps";
 
 const dispatchMock = vi.fn(
-  async (_input: { agentUrl: string; payload: string; timeoutMs: number }) => "",
+  async (_input: { agentUrl: string; payload: unknown; timeoutMs: number }) => "",
 );
 
 function extractDispatchedInput(dispatchArg: any): Record<string, unknown> {
   // dispatchContentEditor receives { agentUrl, payload, timeoutMs } where
-  // payload is the serialized input envelope. Extract and JSON.parse.
-  return JSON.parse(dispatchArg?.payload ?? "");
+  // payload is the validated input OBJECT (#72 payload-contract parity — the
+  // host serializes it, matching the WordPress connector). Return it directly.
+  return (dispatchArg?.payload ?? {}) as Record<string, unknown>;
 }
 
 describe("createDrupalWidgetChatTool", () => {

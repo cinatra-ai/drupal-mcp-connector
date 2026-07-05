@@ -537,7 +537,7 @@ describe("createDrupalPrimitiveHandlers", () => {
 // lives HOST-side behind `deps.dispatchContentEditor`, which resolves with the
 // agent's reply TEXT. These tests register a deps stub and assert the
 // connector's stripCodeFences + JSON.parse of that text, plus that dispatch is
-// invoked with the resolved agentUrl + 300s budget + serialized input.
+// invoked with the resolved agentUrl + 300s budget + the validated input object.
 // ---------------------------------------------------------------------------
 
 import {
@@ -548,7 +548,7 @@ import {
 const dispatchMock = vi.fn(
   async (_input: {
     agentUrl: string;
-    payload: string;
+    payload: unknown;
     timeoutMs: number;
     packageName: string;
   }) => "",
@@ -684,7 +684,7 @@ describe("drupal_content_editor_run", () => {
     });
   });
 
-  it("serializes the validated input into the dispatch payload", async () => {
+  it("forwards the validated input object as the dispatch payload", async () => {
     dispatchMock.mockResolvedValue('{"nodeId":"5","changes":[]}');
     await (handlers as any).drupal_content_editor_run({
       primitiveName: "drupal_content_editor_run",
@@ -697,12 +697,18 @@ describe("drupal_content_editor_run", () => {
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    const arg = dispatchMock.mock.calls[0][0] as { payload: string };
-    const payload = JSON.parse(arg.payload);
-    expect(payload.instanceId).toBe("site-1");
-    expect(payload.nodeId).toBe("5");
-    expect(payload.nodeBundle).toBe("article");
-    expect(payload.instructions).toBe("Update title to Hello");
+    const arg = dispatchMock.mock.calls[0][0] as {
+      payload: {
+        instanceId: string;
+        nodeId: string;
+        nodeBundle: string;
+        instructions: string;
+      };
+    };
+    expect(arg.payload.instanceId).toBe("site-1");
+    expect(arg.payload.nodeId).toBe("5");
+    expect(arg.payload.nodeBundle).toBe("article");
+    expect(arg.payload.instructions).toBe("Update title to Hello");
   });
 
   it("strips Markdown code fences before JSON.parse", async () => {
