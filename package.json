@@ -19,7 +19,8 @@
     "./mcp-toolbox": "./src/mcp/toolbox.ts",
     "./mcp-module": "./src/mcp/module.ts",
     "./widget-chat-tool": "./src/widget-chat-tool.ts",
-    "./src/webhooks/node-published": "./src/webhooks/node-published.ts"
+    "./src/webhooks/node-published": "./src/webhooks/node-published.ts",
+    "./src/dev-setup": "./src/dev-setup.ts"
   },
   "scripts": {
     "test": "vitest",
@@ -61,6 +62,7 @@
     "displayName": "Drupal MCP",
     "providesExternalMcpToolbox": true,
     "serverEntry": "./register",
+    "devSetup": "./src/dev-setup",
     "requestedHostPorts": [
       "nango",
       "capabilities"
