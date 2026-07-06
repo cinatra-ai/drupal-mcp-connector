@@ -463,4 +463,51 @@ describe("autoSetupLocalDrupal — Nango branch routing + local-dev transition",
 
     expect(r.status).not.toBe("skipped");
   });
+
+  // "Soft-fails ... never throws" contract: an UNEXPECTED throw from any host
+  // helper must resolve to an error STATUS, never reject to the dev-boot shell,
+  // and must NOT leak the raw error text (SECRET BOUNDARY).
+  it("SOFT-FAIL: a throwing host helper yields an error status, not a rejection (never escapes to the host)", async () => {
+    const t = makeDeps();
+    (t.deps.helpers.probeDockerContainer as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error(`SENSITIVE-HELPER-LEAK-${STORED_BEARER}`);
+    });
+
+    const r = await autoSetupLocalDrupal(t.deps);
+
+    expect(r.status).toBe("error");
+    if (r.status !== "error") throw new Error("expected error");
+    expect(r.reason).toBe("dev auto-setup failed unexpectedly");
+    expect(r.reason).not.toContain("SENSITIVE-HELPER-LEAK");
+    expect(r.reason).not.toContain(STORED_BEARER);
+  });
+
+  it("SOFT-FAIL: a rejecting listInstances yields an error status, not a rejection", async () => {
+    const t = makeDeps();
+    t.isNangoConfigured.mockReturnValue(true);
+    t.listInstances.mockRejectedValueOnce(new Error("host list crashed"));
+
+    const r = await autoSetupLocalDrupal(t.deps);
+
+    expect(r.status).toBe("error");
+    if (r.status !== "error") throw new Error("expected error");
+    expect(r.reason).toBe("dev auto-setup failed unexpectedly");
+  });
+});
+
+describe("ensureDrupalRemoteKeyReconciled — probe soft-fail", () => {
+  it("SOFT-FAIL: a THROWING devProbeWithBearer keeps the existing key (no rotate) and never rejects or leaks", async () => {
+    const t = makeDeps();
+    t.getNangoCredentials.mockResolvedValueOnce({ apiKey: STORED_BEARER });
+    t.devProbeWithBearer.mockRejectedValueOnce(new Error(`SENSITIVE-PROBE-LEAK-${STORED_BEARER}`));
+
+    const r = await ensureDrupalRemoteKeyReconciled(t.deps, drupalInput);
+
+    expect(r).toMatchObject({ working: false, rotated: false });
+    expect(mintCalls(t.docker)).toBe(0); // never rotates on a throwing probe
+    expect(t.saveInstance).not.toHaveBeenCalled();
+    expect(t.devInvalidateProbeCache).not.toHaveBeenCalled();
+    expect(r.note).not.toContain("SENSITIVE-PROBE-LEAK");
+    expect(r.note).not.toContain(STORED_BEARER);
+  });
 });

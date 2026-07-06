@@ -228,10 +228,18 @@ export async function ensureDrupalRemoteKeyReconciled(
     return rotate("split-brain: widget-uuid stored");
   }
 
-  // 3. Probe live with the stored Bearer (cache-bypassing).
-  const status = deps.drupal.devProbeWithBearer
-    ? await deps.drupal.devProbeWithBearer(input.siteUrl, storedBearer)
-    : "unreachable";
+  // 3. Probe live with the stored Bearer (cache-bypassing). A THROWING probe is
+  //    a transient/non-auth failure (never a definite auth verdict) — keep the
+  //    existing key and soft-skip, honoring the module's "never throws" contract.
+  let status: Awaited<ReturnType<NonNullable<DrupalDevSetupDeps["drupal"]["devProbeWithBearer"]>>> | "unreachable";
+  try {
+    status = deps.drupal.devProbeWithBearer
+      ? await deps.drupal.devProbeWithBearer(input.siteUrl, storedBearer)
+      : "unreachable";
+  } catch {
+    // SECRET BOUNDARY: fixed connector-owned note only — never the raw error.
+    return { working: false, rotated: false, note: "probe-error (kept existing; not rotating)" };
+  }
   if (status === "registered") {
     return { working: true, rotated: false };
   }
@@ -329,10 +337,27 @@ export async function wireLocalDrupalWithoutNango(
 }
 
 /**
- * The Drupal auto-setup body (exported for tests; `runDevSetup` wraps it with
- * capability resolution).
+ * The Drupal auto-setup entry (exported for tests; `runDevSetup` wraps it with
+ * capability resolution). SOFT-FAILS: an outer try/catch guarantees an
+ * ExtensionDevSetupStatus is returned even if a host helper throws unexpectedly
+ * (probeDockerContainer / probeHttpReachableWithRetry / listInstances /
+ * isNangoConfigured / widgetAuth.read|generate), honoring the module's
+ * "never throws" contract so a dev boot is never blocked.
  */
 export async function autoSetupLocalDrupal(
+  deps: DrupalDevSetupDeps,
+): Promise<ExtensionDevSetupStatus> {
+  try {
+    return await autoSetupLocalDrupalBody(deps);
+  } catch {
+    // SECRET BOUNDARY: any unexpected throw must soft-fail to a status — never
+    // escape to the dev-boot shell, never forward the raw error text. Fixed
+    // connector-owned reason only.
+    return { status: "error", reason: "dev auto-setup failed unexpectedly" };
+  }
+}
+
+async function autoSetupLocalDrupalBody(
   deps: DrupalDevSetupDeps,
 ): Promise<ExtensionDevSetupStatus> {
   const { helpers } = deps;
@@ -559,19 +584,30 @@ function isNangoSystemSurface(impl: unknown): impl is NangoSystemSurface {
 
 /** The `cinatra.devSetup` entry point the host's dev-only shell invokes. */
 export async function runDevSetup(ctx: ExtensionDevSetupContext): Promise<ExtensionDevSetupStatus> {
-  const drupalImpl = resolveImpl(ctx, "@cinatra-ai/host:drupal-mcp");
-  const widgetAuthImpl = resolveImpl(ctx, "@cinatra-ai/host:drupal-widget-auth");
-  const nangoImpl = resolveImpl(ctx, "nango-system");
-  if (!isDrupalMcpService(drupalImpl) || !isDrupalWidgetAuthService(widgetAuthImpl) || !isNangoSystemSurface(nangoImpl)) {
-    return { status: "skipped", reason: "host services unresolved (drupal-mcp / drupal-widget-auth / nango-system)" };
+  try {
+    const drupalImpl = resolveImpl(ctx, "@cinatra-ai/host:drupal-mcp");
+    const widgetAuthImpl = resolveImpl(ctx, "@cinatra-ai/host:drupal-widget-auth");
+    const nangoImpl = resolveImpl(ctx, "nango-system");
+    if (
+      !isDrupalMcpService(drupalImpl) ||
+      !isDrupalWidgetAuthService(widgetAuthImpl) ||
+      !isNangoSystemSurface(nangoImpl)
+    ) {
+      return { status: "skipped", reason: "host services unresolved (drupal-mcp / drupal-widget-auth / nango-system)" };
+    }
+    return await autoSetupLocalDrupal({
+      drupal: drupalImpl,
+      widgetAuth: widgetAuthImpl,
+      nango: nangoImpl,
+      helpers: ctx.helpers,
+      log: ctx.log,
+      mintDevConnectCredential: ctx.mintDevConnectCredential,
+      browserBaseUrl: ctx.browserBaseUrl,
+    });
+  } catch {
+    // SECRET BOUNDARY: capability resolution (ctx.capabilities.resolveProviders)
+    // or a host-service call throwing must still yield a status — never escape
+    // to the dev-boot shell. Fixed connector-owned reason only.
+    return { status: "error", reason: "dev auto-setup failed unexpectedly" };
   }
-  return autoSetupLocalDrupal({
-    drupal: drupalImpl,
-    widgetAuth: widgetAuthImpl,
-    nango: nangoImpl,
-    helpers: ctx.helpers,
-    log: ctx.log,
-    mintDevConnectCredential: ctx.mintDevConnectCredential,
-    browserBaseUrl: ctx.browserBaseUrl,
-  });
 }
