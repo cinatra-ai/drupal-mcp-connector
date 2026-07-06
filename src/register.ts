@@ -21,6 +21,8 @@
 // structural types so the connector compiles against ANY host SDK it can
 // meet during skew.
 
+import { randomUUID } from "node:crypto";
+
 import type { ExtensionHostContext, NangoSystemSurface } from "@cinatra-ai/sdk-extensions";
 import { registerDrupalConnector, type DrupalConnectorDeps } from "./deps";
 
@@ -159,6 +161,59 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): DrupalConnectorDeps {
   };
 }
 
+// The generic host connector-config KV service
+// (`@cinatra-ai/host:connector-config`) — the per-connector key/value store the
+// host publishes. The widget-auth store (below) persists through it.
+type HostConnectorConfigShape = {
+  read<T>(connectorId: string, fallback: T): T;
+  write(connectorId: string, value: unknown): void;
+};
+
+// --- widget auth-config store (cinatra#975 Wave 2 — vendor-publish-direction
+// inversion, epic #978) -------------------------------------------------------
+// This connector now OWNS the widget-auth store: it INVERTED out of core
+// (`@/lib/drupal-widget-auth`) and is registered as the
+// `@cinatra-ai/host:drupal-widget-auth` capability (in register() below). The
+// store persists the UUID-pair widget api key under
+// `connector_config:drupal_widget_auth` THROUGH the host connector-config
+// capability. read/generate are SYNC — behavior-identical to the former core
+// store. The request-time origin/token/CORS validation is unchanged: it lives in
+// the host's generic widget-stream auth (via the cinatra.widgetStream.auth
+// manifest entry), NOT here; only the AUTH-CONFIG storage + minting moved.
+const WIDGET_AUTH_CONFIG_KEY = "drupal_widget_auth";
+
+type DrupalWidgetAuthConfig = {
+  apiKey: string;
+  generatedAt: string;
+};
+
+type DrupalWidgetAuthProvider = {
+  read(): DrupalWidgetAuthConfig | null;
+  /** WRITER — mint + persist a fresh widget api key (invalidates the old). */
+  generate(): DrupalWidgetAuthConfig;
+};
+
+/** Build the widget-auth store impl this connector registers. Every member
+ * resolves the host connector-config capability LAZILY at call time (no
+ * resolution at construction — probe-safe), then reads/writes the single config
+ * row. Fail-loud: a host that never published connector-config throws through
+ * hostService(). */
+function buildWidgetAuthProvider(ctx: ExtensionHostContext): DrupalWidgetAuthProvider {
+  const connectorConfig = () =>
+    hostService<HostConnectorConfigShape>(ctx, "@cinatra-ai/host:connector-config");
+  return {
+    read: () => connectorConfig().read<DrupalWidgetAuthConfig | null>(WIDGET_AUTH_CONFIG_KEY, null),
+    generate: () => {
+      const config: DrupalWidgetAuthConfig = {
+        apiKey: `${randomUUID()}-${randomUUID()}`,
+        generatedAt: new Date().toISOString(),
+      };
+      connectorConfig().write(WIDGET_AUTH_CONFIG_KEY, config);
+      return config;
+    },
+  };
+}
+
 export function register(ctx: ExtensionHostContext): void {
   // Transport-DI inversion: bind the host deps slot. Always-bind (the
   // bind-if-absent skew guard was swept once every host this connector can
@@ -166,4 +221,15 @@ export function register(ctx: ExtensionHostContext): void {
   // re-binds fresh lazy resolvers, so a stale deps object can never outlive
   // its digest.
   registerDrupalConnector(buildHostBoundDeps(ctx));
+
+  // cinatra#975 Wave 2 — register the connector-owned widget-auth store as the
+  // `@cinatra-ai/host:drupal-widget-auth` capability. The publish direction
+  // inverted: the host no longer implements/publishes it; this connector's own
+  // dev-setup hook resolves it lazily from the registry. Building the impl does
+  // no host-service resolution (probe-safe) — read/generate resolve
+  // connector-config at call time.
+  ctx.capabilities.registerProvider("@cinatra-ai/host:drupal-widget-auth", {
+    packageName: PACKAGE_NAME,
+    impl: buildWidgetAuthProvider(ctx),
+  });
 }
