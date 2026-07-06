@@ -23,8 +23,16 @@
 
 import { randomUUID } from "node:crypto";
 
-import type { ExtensionHostContext, NangoSystemSurface } from "@cinatra-ai/sdk-extensions";
+import type {
+  ExtensionHostContext,
+  HostDrupalMcpService,
+  NangoSystemSurface,
+} from "@cinatra-ai/sdk-extensions";
 import { registerDrupalConnector, type DrupalConnectorDeps } from "./deps";
+import {
+  buildDrupalInstanceClient,
+  type DrupalConnectionGateSlice,
+} from "./lib/drupal-instances";
 
 const PACKAGE_NAME = "@cinatra-ai/drupal-mcp-connector";
 
@@ -214,6 +222,71 @@ function buildWidgetAuthProvider(ctx: ExtensionHostContext): DrupalWidgetAuthPro
   };
 }
 
+// --- Drupal instance-settings client (cinatra#975 Wave 3 — vendor-publish-
+// direction inversion, epic #978) ---------------------------------------------
+// This connector now OWNS the instance-settings client: it INVERTED out of core
+// (`@/lib/drupal-api`, ~460 LOC) into `./lib/drupal-instances` and is registered
+// below as a provider under the SAME `@cinatra-ai/host:drupal-mcp` capability id
+// the host publishes (provider-flip — NO sdk-extensions contract change).
+// Providers coexist keyed by packageName: the host boot wiring
+// (register-host-connector-services) registers its full-service provider BEFORE
+// activation, so every existing `[0]` resolver keeps resolving the host impl
+// unchanged until the single core-eviction follow-up PR re-points core's
+// registration at THIS provider (resolved by packageName from the generated
+// manifest — the W2 widget-auth anti-spoof pattern).
+//
+// The provider carries ONLY the relocated drupal-api member set. Explicit
+// NON-members (they stay host-side this slice): probe / resolveServerUrl /
+// isPrivateUrl / getInstanceStatuses (the `@/lib/drupal-mcp-connection` +
+// url-policy surface) and listAuthorizedInstances (the actor-gated
+// instance-list authority — authz stays core, the #975 pin), plus
+// devProbeWithBearer / devInvalidateProbeCache (the host probe cache).
+
+/** The host runtime-mode service (`@cinatra-ai/host:runtime-mode`). */
+type HostRuntimeModeShape = { isDevelopment(): boolean };
+
+type DrupalInstanceAdminProvider = Pick<
+  HostDrupalMcpService,
+  "listInstances" | "getAPIStatus" | "saveInstance" | "deleteInstance" | "devPersistLocalInstanceUnvalidated"
+>;
+
+/** Build the connector-owned drupal-mcp instance-admin provider. Every member
+ * resolves its host capabilities LAZILY at call time (no resolution at
+ * construction — probe-safe); a missing capability fails loud through
+ * hostService()/nangoSystem(). */
+function buildDrupalInstanceAdminProvider(ctx: ExtensionHostContext): DrupalInstanceAdminProvider {
+  const client = buildDrupalInstanceClient({
+    connectorConfig: () =>
+      hostService<HostConnectorConfigShape>(ctx, "@cinatra-ai/host:connector-config"),
+    nango: () => nangoSystem(ctx),
+    connectionGate: () =>
+      hostService<DrupalConnectionGateSlice>(ctx, "@cinatra-ai/host:instance-connection-gate"),
+    // Swallowed-cleanup warnings route through the ambient logger port (#981);
+    // the message text keeps the exact former `[drupal-api]` label.
+    warn: (message) => ctx.logger.warn(message),
+  });
+  return {
+    listInstances: () => client.getDrupalAPISettings().instances,
+    getAPIStatus: () => client.getDrupalAPIStatus(),
+    saveInstance: (input) => client.saveDrupalInstance(input),
+    deleteInstance: (id) => client.deleteDrupalInstance(id),
+    // Dev-boot provisioning member (cinatra#976, epic #978 W-D). Resolved ONLY
+    // by this connector's own `dev-setup.ts` hook via the strictly dev-gated
+    // `dev-auto-setup` shell — defense-in-depth refused outside development
+    // (the same guard + message the host registration carried; the persist
+    // helper itself ALSO enforces loopback-only).
+    devPersistLocalInstanceUnvalidated: async (input) => {
+      if (!hostService<HostRuntimeModeShape>(ctx, "@cinatra-ai/host:runtime-mode").isDevelopment()) {
+        throw new Error(
+          "drupal-mcp.devPersistLocalInstanceUnvalidated is a dev-only devSetup provisioning member; refused outside development.",
+        );
+      }
+      const persisted = await client.persistLocalDevDrupalInstanceUnvalidated(input);
+      return { id: persisted.id };
+    },
+  };
+}
+
 export function register(ctx: ExtensionHostContext): void {
   // Transport-DI inversion: bind the host deps slot. Always-bind (the
   // bind-if-absent skew guard was swept once every host this connector can
@@ -231,5 +304,18 @@ export function register(ctx: ExtensionHostContext): void {
   ctx.capabilities.registerProvider("@cinatra-ai/host:drupal-widget-auth", {
     packageName: PACKAGE_NAME,
     impl: buildWidgetAuthProvider(ctx),
+  });
+
+  // cinatra#975 Wave 3 (drupal slice) — register the connector-owned Drupal
+  // instance-settings client as a provider under the SAME
+  // `@cinatra-ai/host:drupal-mcp` capability id (see the module note above
+  // buildDrupalInstanceAdminProvider: coexistence keyed by packageName; the
+  // core-eviction follow-up re-points core's registration at this provider).
+  // Building the impl does no host-service resolution (probe-safe) — every
+  // member resolves connector-config / nango-system / instance-connection-gate /
+  // runtime-mode at call time.
+  ctx.capabilities.registerProvider("@cinatra-ai/host:drupal-mcp", {
+    packageName: PACKAGE_NAME,
+    impl: buildDrupalInstanceAdminProvider(ctx),
   });
 }
