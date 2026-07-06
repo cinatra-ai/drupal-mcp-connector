@@ -17,9 +17,6 @@
 // SDK imports are TYPE-ONLY (host-peer value-import ban); the host services
 // resolve at call time through the capability port on the hook context.
 
-import { existsSync } from "node:fs";
-import path from "node:path";
-
 import type {
   ExtensionDevSetupContext,
   ExtensionDevSetupHelpers,
@@ -381,8 +378,19 @@ async function autoSetupLocalDrupalBody(
   }
 
   // The Drupal module is consumed as a local clone of cinatra-ai/drupal-module
-  // (synced by `cinatra setup dev`). Skip cleanly if it hasn't been cloned yet.
-  if (!existsSync(path.join(process.cwd(), "dev/drupal-module/cinatra/cinatra.module"))) {
+  // (synced by `cinatra setup dev`) and BIND-MOUNTED into the container at
+  // web/modules/custom/cinatra (docker-compose.yml). Probe for it INSIDE the
+  // container through the host-owned dockerExecCapture helper instead of reaching
+  // for node:fs against the host cwd (cinatra#979/#981 extension fs-import ban) —
+  // a missing/empty bind mount yields a non-zero `test -f` and the SAME clean
+  // skip. `test` is a POSIX sh builtin, so this has no coreutils dependency.
+  if (
+    helpers.dockerExecCapture(LOCAL_DRUPAL.containerName, [
+      "sh",
+      "-c",
+      "test -f /drupal/web/modules/custom/cinatra/cinatra.module",
+    ]).code !== 0
+  ) {
     return {
       status: "skipped",
       reason: "module clone missing at dev/drupal-module/cinatra/cinatra.module. Run `cinatra setup dev` first.",

@@ -14,14 +14,10 @@
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
-// `autoSetupLocalDrupal` checks `existsSync(dev/drupal-module/...)`; in the
-// unit sandbox that clone is absent. Force it present so the orchestration
-// tests reach the Nango branch under test.
-vi.mock("node:fs", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("node:fs")>()),
-  existsSync: vi.fn(() => true),
-}));
-
+// `autoSetupLocalDrupal` probes the module-clone fixture INSIDE the container
+// via `dockerExecCapture(["sh","-c","test -f …"])` (no host node:fs). The docker
+// mock defaults to `{ code: 0 }`, so the probe reports the fixture present and
+// the orchestration tests reach the Nango branch under test.
 import {
   parseDrupalRemoteKey,
   ensureDrupalRemoteKeyReconciled,
