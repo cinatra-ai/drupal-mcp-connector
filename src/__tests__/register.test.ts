@@ -19,11 +19,19 @@ function activateWithServices(impls: Record<string, unknown>) {
       ? [{ packageName: "@cinatra-ai/host", impl: impls[capability] }]
       : [],
   );
+  const registerProvider = vi.fn();
   const ctx = {
-    capabilities: { registerProvider: () => {}, resolveProviders },
+    capabilities: { registerProvider, resolveProviders },
   } as never;
   register(ctx);
-  return { resolveProviders };
+  return { resolveProviders, registerProvider };
+}
+
+/** The impl register(ctx) registered under `capability` (cinatra#975 W2/W3). */
+function registeredImpl<T>(registerProvider: ReturnType<typeof vi.fn>, capability: string): T {
+  const call = registerProvider.mock.calls.find(([id]) => id === capability);
+  if (!call) throw new Error(`no provider registered for ${capability}`);
+  return call[1].impl as T;
 }
 
 beforeEach(() => {
@@ -226,6 +234,111 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
     expect(() => getDrupalDeps().getApiStatus()).toThrow(
       /host service "@cinatra-ai\/host:drupal-mcp" is not registered/,
     );
+  });
+
+  it("registers the connector-owned drupal-mcp instance-admin provider under the SAME capability id, keyed by the connector package (cinatra#975 W3)", () => {
+    const { registerProvider, resolveProviders } = activateWithServices({});
+    const call = registerProvider.mock.calls.find(([id]) => id === "@cinatra-ai/host:drupal-mcp");
+    expect(call).toBeTruthy();
+    // Coexistence contract: keyed by the CONNECTOR package name (the host's own
+    // provider stays registered under @cinatra-ai/host until the core-eviction
+    // follow-up re-points it at this one).
+    expect(call![1].packageName).toBe("@cinatra-ai/drupal-mcp-connector");
+    // The relocated drupal-api member set — and ONLY it. The connection-probe
+    // members and the actor-gated lister are explicit NON-members (they stay
+    // host-side: drupal-mcp-connection / the instance-list authority — authz
+    // stays core).
+    const impl = call![1].impl as Record<string, unknown>;
+    for (const member of [
+      "listInstances",
+      "getAPIStatus",
+      "saveInstance",
+      "deleteInstance",
+      "devPersistLocalInstanceUnvalidated",
+    ]) {
+      expect(typeof impl[member]).toBe("function");
+    }
+    for (const nonMember of [
+      "probe",
+      "resolveServerUrl",
+      "isPrivateUrl",
+      "getInstanceStatuses",
+      "listAuthorizedInstances",
+      "devProbeWithBearer",
+      "devInvalidateProbeCache",
+    ]) {
+      expect(impl[nonMember]).toBeUndefined();
+    }
+    // Probe-safe: building + registering the impl resolved NO host service.
+    expect(resolveProviders).not.toHaveBeenCalled();
+  });
+
+  it("W3 provider members resolve connector-config / nango-system LAZILY at call time (byte-equivalent persistence under connector_config:drupal)", () => {
+    const store: Record<string, unknown> = {
+      drupal: {
+        instances: [
+          {
+            id: "site-1",
+            name: "Site 1",
+            siteUrl: "https://s.example.com",
+            nangoConnectionId: "site-1",
+            providerConfigKey: "cinatra-drupal",
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+          },
+        ],
+      },
+    };
+    const { registerProvider, resolveProviders } = activateWithServices({
+      "@cinatra-ai/host:connector-config": {
+        read: <T,>(key: string, fallback: T): T => (store[key] as T) ?? fallback,
+        write: (key: string, value: unknown) => {
+          store[key] = value;
+        },
+      },
+    });
+    const impl = registeredImpl<{ listInstances(): Array<{ id: string }> }>(
+      registerProvider,
+      "@cinatra-ai/host:drupal-mcp",
+    );
+    expect(resolveProviders).not.toHaveBeenCalled();
+    expect(impl.listInstances().map((i) => i.id)).toEqual(["site-1"]);
+    expect(resolveProviders).toHaveBeenCalledWith("@cinatra-ai/host:connector-config");
+  });
+
+  it("W3 devPersistLocalInstanceUnvalidated is REFUSED outside development (runtime-mode gate) and persists + returns {id} in dev", async () => {
+    const store: Record<string, unknown> = {};
+    const impls = {
+      "@cinatra-ai/host:connector-config": {
+        read: <T,>(key: string, fallback: T): T => (store[key] as T) ?? fallback,
+        write: (key: string, value: unknown) => {
+          store[key] = value;
+        },
+      },
+      "@cinatra-ai/host:runtime-mode": { isDevelopment: () => false },
+      "nango-system": {
+        isNangoConfigured: () => false,
+        providerConfigKeys: { drupal: "cinatra-drupal" },
+      },
+    };
+    const { registerProvider } = activateWithServices(impls);
+    const impl = registeredImpl<{
+      devPersistLocalInstanceUnvalidated(input: {
+        name: string;
+        siteUrl: string;
+      }): Promise<{ id: string }>;
+    }>(registerProvider, "@cinatra-ai/host:drupal-mcp");
+
+    await expect(
+      impl.devPersistLocalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082" }),
+    ).rejects.toThrow(/dev-only devSetup provisioning member; refused outside development/);
+    expect(store.drupal).toBeUndefined();
+
+    impls["@cinatra-ai/host:runtime-mode"] = { isDevelopment: () => true };
+    await expect(
+      impl.devPersistLocalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082" }),
+    ).resolves.toMatchObject({ id: expect.any(String) });
+    expect((store.drupal as { instances: unknown[] }).instances).toHaveLength(1);
   });
 
   it("fails LOUD with the package name + registration step when the SLOT itself is unbound", () => {

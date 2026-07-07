@@ -131,7 +131,7 @@ describe("createDrupalPrimitiveHandlers", () => {
     expect(result.map((i) => i.id)).toEqual(["new", "old"]);
   });
 
-  it("drupal_instances_list returns the configured instances with no credential-bearing field", async () => {
+  it("drupal_instances_list redacts the Nango credential binding at the read boundary", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "a" }), inst({ id: "b" })]);
     const result = (await (handlers as any).drupal_instances_list({
       primitiveName: "drupal_instances_list",
@@ -141,11 +141,20 @@ describe("createDrupalPrimitiveHandlers", () => {
     })) as any;
     expect(Array.isArray(result)).toBe(true);
     expect(result).toHaveLength(2);
-    // No secret is stored in the row at all. nangoConnectionId is a pointer,
-    // not a credential, and is safe to expose.
+    // The LLM tool caller must NEVER receive the credential binding: the vault
+    // slot (nangoConnectionId/providerConfigKey) is what a caller could use to
+    // reach the site's stored credential.
+    expect(result[0].nangoConnectionId).toBeUndefined();
+    expect(result[0].providerConfigKey).toBeUndefined();
     expect(result[0].mcpApiKey).toBeUndefined();
-    expect(result[0].nangoConnectionId).toBe("a");
-    expect(result[0].providerConfigKey).toBe("cinatra-drupal");
+    // Non-secret display fields are preserved.
+    expect(result[0].id).toBe("a");
+    expect(result[0].name).toBe("Site 1");
+    expect(result[0].siteUrl).toBe("http://localhost:8082");
+    expect(result[0].createdAt).toBe("2026-01-01T00:00:00Z");
+    // Belt-and-braces: no key on any row carries the binding, so a JSON.stringify
+    // of the tool result (what the registry emits to the LLM) cannot leak it.
+    expect(JSON.stringify(result)).not.toMatch(/nangoConnectionId|providerConfigKey/);
   });
 
   it("drupal_node_get throws when instanceId not found", async () => {
@@ -528,7 +537,7 @@ describe("createDrupalPrimitiveHandlers", () => {
 // lives HOST-side behind `deps.dispatchContentEditor`, which resolves with the
 // agent's reply TEXT. These tests register a deps stub and assert the
 // connector's stripCodeFences + JSON.parse of that text, plus that dispatch is
-// invoked with the resolved agentUrl + 300s budget + serialized input.
+// invoked with the resolved agentUrl + 300s budget + the validated input object.
 // ---------------------------------------------------------------------------
 
 import {
@@ -539,7 +548,7 @@ import {
 const dispatchMock = vi.fn(
   async (_input: {
     agentUrl: string;
-    payload: string;
+    payload: unknown;
     timeoutMs: number;
     packageName: string;
   }) => "",
@@ -675,7 +684,7 @@ describe("drupal_content_editor_run", () => {
     });
   });
 
-  it("serializes the validated input into the dispatch payload", async () => {
+  it("forwards the validated input object as the dispatch payload", async () => {
     dispatchMock.mockResolvedValue('{"nodeId":"5","changes":[]}');
     await (handlers as any).drupal_content_editor_run({
       primitiveName: "drupal_content_editor_run",
@@ -688,12 +697,18 @@ describe("drupal_content_editor_run", () => {
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    const arg = dispatchMock.mock.calls[0][0] as { payload: string };
-    const payload = JSON.parse(arg.payload);
-    expect(payload.instanceId).toBe("site-1");
-    expect(payload.nodeId).toBe("5");
-    expect(payload.nodeBundle).toBe("article");
-    expect(payload.instructions).toBe("Update title to Hello");
+    const arg = dispatchMock.mock.calls[0][0] as {
+      payload: {
+        instanceId: string;
+        nodeId: string;
+        nodeBundle: string;
+        instructions: string;
+      };
+    };
+    expect(arg.payload.instanceId).toBe("site-1");
+    expect(arg.payload.nodeId).toBe("5");
+    expect(arg.payload.nodeBundle).toBe("article");
+    expect(arg.payload.instructions).toBe("Update title to Hello");
   });
 
   it("strips Markdown code fences before JSON.parse", async () => {

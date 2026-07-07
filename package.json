@@ -1,10 +1,11 @@
 {
   "name": "@cinatra-ai/drupal-mcp-connector",
-  "version": "0.1.3",
+  "version": "0.1.6",
   "license": "Apache-2.0",
   "files": [
     "src",
     "cinatra",
+    "skills",
     "!src/__tests__/"
   ],
   "type": "module",
@@ -18,7 +19,9 @@
     "./mcp-handlers": "./src/mcp/handlers.ts",
     "./mcp-toolbox": "./src/mcp/toolbox.ts",
     "./mcp-module": "./src/mcp/module.ts",
-    "./widget-chat-tool": "./src/widget-chat-tool.ts"
+    "./widget-chat-tool": "./src/widget-chat-tool.ts",
+    "./src/webhooks/node-published": "./src/webhooks/node-published.ts",
+    "./src/dev-setup": "./src/dev-setup.ts"
   },
   "scripts": {
     "test": "vitest",
@@ -52,14 +55,34 @@
   "cinatra": {
     "apiVersion": "cinatra.ai/v1",
     "kind": "connector",
+    "sdkAbiRange": "^2",
+    "vendor": {
+      "key": "cinatra-ai",
+      "name": "Cinatra"
+    },
     "displayName": "Drupal MCP",
     "providesExternalMcpToolbox": true,
     "serverEntry": "./register",
+    "devSetup": "./src/dev-setup",
     "requestedHostPorts": [
       "nango",
       "capabilities"
     ],
     "dependencies": [],
+    "capabilities": {
+      "widget-chat.drupal-content-editor": "drupal-widget-chat"
+    },
+    "webhooks": {
+      "hooks": [
+        {
+          "id": "node-published",
+          "handler": "./src/webhooks/node-published",
+          "factory": "createNodePublishedHandler",
+          "label": "Node published",
+          "schemaVersion": 1
+        }
+      ]
+    },
     "widgetStream": {
       "agentSlug": "drupal-content-editor",
       "relayAgentPackage": "@cinatra-ai/drupal-agent",
@@ -97,6 +120,7 @@
           "nangoConnectionId"
         ]
       }
-    }
+    },
+    "consumes": []
   }
 }
