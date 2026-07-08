@@ -3,6 +3,24 @@
 All notable changes to this project are documented here, derived from the
 project's merged pull request and release-tag history.
 
+## v0.1.6 — 2026-07-07
+
+Required rider alongside Cinatra 0.1.7: this release takes ownership of Drupal-specific capability code that Cinatra 0.1.7 removes from core, and adds the Drupal publish-notification receiver.
+
+- feat(widget-auth): own the Drupal widget-auth store and register the capability — on a Cinatra 0.1.7 host, widget sessions on connected sites need this version (cinatra#975 W2) (#58)
+- feat(webhooks): `cinatra.webhooks` declaration and handler for the Drupal node-published event on the host's generic webhook route, with per-binding secret verification host-side; pairs with Drupal module 0.1.6 (#54)
+- feat: bundle the Drupal widget-chat skill in the install closure so fresh installs no longer boot with an unresolved widget-chat capability, and align the content-editor dispatch payload to the WordPress object shape (#56)
+- feat(instances): own the relocated Drupal instance-settings client, registered under its host capability (cinatra#975 W3) (#59)
+- feat(dev-setup): dev-mode provisioning moves into a connector-owned `devSetup` hook (cinatra#976) (#55); the dev fixture probe runs in-container, dropping the `node:fs` host precheck (#57)
+
+## v0.1.5 — 2026-07-04
+
+- feat: final connection access-scoping declaration — default scope "workspace" (cinatra#954 W4) (#53)
+- feat(mcp): declare the mcp.json primitive surface for the Drupal MCP tools (#51)
+- fix(security): redact the Nango credential binding from `drupal_instances_list` (#50)
+- chore(deps): declare `cinatra.consumes` for closure-gate enrollment (#49)
+- docs/ci: CHANGELOG derived from tag and merged-PR history (#52); release workflow pinned to the gated reusable extension-release flow (release-approval wall) (#48)
+
 ## v0.1.4 — 2026-06-28
 
 - fix: declared `cinatra.vendor` identity ahead of a marketplace re-submit (#45)
