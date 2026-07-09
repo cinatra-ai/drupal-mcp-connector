@@ -41,10 +41,13 @@ function registerHandlersDepsStub() {
   });
 }
 
-// Actual tool names discovered 2026-04-27 against Drupal 11 + mcp_tools ^1.0@beta:
-// drupal_node_get uses mcp_tools_get_recent_content because search requires
-// >=3 chars and does not support nid-specific lookup.
-const DRUPAL_NODE_GET_TOOL = "mcp_tools_get_recent_content";
+// Actual tool names discovered against Drupal 11 + drupal/mcp_tools 1.0.0-beta14:
+// drupal_node_get's PRIMARY full-field read routes through the MCP module's
+// mcp_jsonapi_list_entities (mcp_tools_jsonapi submodule; carries body.value),
+// and falls back to mcp_tools_get_recent_content (a summary row WITHOUT body)
+// only when the MCP jsonapi read is unavailable (cinatra#1214 S2).
+const DRUPAL_NODE_GET_READ_TOOL = "mcp_jsonapi_list_entities";
+const DRUPAL_NODE_GET_FALLBACK_TOOL = "mcp_tools_get_recent_content";
 const DRUPAL_NODE_UPDATE_TOOL = "mcp_update_content";
 const DRUPAL_NODE_CREATE_DRAFT_TOOL = "mcp_create_content";   // status: false for draft
 const DRUPAL_NODE_LIST_TOOL = "mcp_tools_get_recent_content";
@@ -63,22 +66,55 @@ const inst = (over: Partial<{ id: string; name: string; siteUrl: string; nangoCo
   updatedAt: "2026-01-01T00:00:00Z",
 });
 
-// JSON:API fetch mock. `drupal_node_get` now reads the full node via JSON:API
-// (the field-level-diff fix), falling back to mcp_tools_get_recent_content only
-// when JSON:API is unavailable. A `Response`-shaped helper keeps the tests
-// transport-agnostic.
-const fetchMock = vi.fn();
-function jsonApiResponse(body: unknown, ok = true, status = 200) {
+// `drupal_node_get` reads the full node over MCP via `callDrupalMcp`
+// (mcp_jsonapi_list_entities), with mcp_tools_get_recent_content as the
+// transient-unavailability fallback (cinatra#1214 S2). Both are the SAME mocked
+// `callDrupalMcp`; tests drive them by switching on the tool-name argument.
+//
+// `serializedNode` mirrors the drupal/mcp_tools `serializeEntity` shape the read
+// consumes: top-level entity_type/bundle/id/uuid/label/status + a `fields` map
+// whose single-cardinality members are already flattened (a text_with_summary
+// `body` arrives as `fields.body` = the raw body.value string).
+function serializedNode(over: Record<string, unknown> = {}) {
+  const { fields, ...rest } = over as { fields?: Record<string, unknown> };
   return {
-    ok,
-    status,
-    json: async () => body,
-  } as unknown as Response;
+    entity_type: "node",
+    bundle: "article",
+    id: 5,
+    uuid: "uuid-123",
+    label: "Old headline",
+    status: true,
+    ...rest,
+    // When the caller supplies `fields` it is used VERBATIM (so a test can model
+    // a node with no body / no title); otherwise a default article field map.
+    fields: fields ?? { title: "Old headline", body: "<p>Old body source</p>", nid: 5 },
+  };
+}
+// The unwrapped { items, total, ... } data object callDrupalMcp returns for
+// mcp_jsonapi_list_entities.
+function mcpListEnvelope(...nodes: Record<string, unknown>[]) {
+  return { items: nodes, total: nodes.length, limit: 1, offset: 0, has_more: false };
+}
+// Route the single callDrupalMcp mock by tool name: PRIMARY read vs fallback.
+function routeCallDrupalMcp(routes: {
+  read?: (args: Record<string, unknown>) => unknown;
+  fallback?: (args: Record<string, unknown>) => unknown;
+}) {
+  vi.mocked(callDrupalMcp).mockImplementation(async (_inst, tool, args) => {
+    if (tool === DRUPAL_NODE_GET_READ_TOOL) {
+      if (!routes.read) throw new Error(`unexpected MCP read call: ${tool}`);
+      return routes.read(args as Record<string, unknown>);
+    }
+    if (tool === DRUPAL_NODE_GET_FALLBACK_TOOL) {
+      if (!routes.fallback) throw new Error(`unexpected fallback call: ${tool}`);
+      return routes.fallback(args as Record<string, unknown>);
+    }
+    throw new Error(`unexpected tool: ${tool}`);
+  });
 }
 
 describe("createDrupalPrimitiveHandlers", () => {
   let handlers: ReturnType<typeof createDrupalPrimitiveHandlers>;
-  let originalFetch: typeof globalThis.fetch;
   beforeEach(() => {
     handlers = createDrupalPrimitiveHandlers();
     listMcpInstancesMock.mockReset();
@@ -88,14 +124,10 @@ describe("createDrupalPrimitiveHandlers", () => {
     requireInstanceWriteAuthorityMock.mockReset();
     requireInstanceWriteAuthorityMock.mockResolvedValue(undefined);
     vi.mocked(callDrupalMcp).mockReset();
-    fetchMock.mockReset();
-    originalFetch = globalThis.fetch;
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
     registerHandlersDepsStub();
   });
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
     _resetDrupalDepsForTests();
   });
 
@@ -169,30 +201,46 @@ describe("createDrupalPrimitiveHandlers", () => {
     ).rejects.toThrow(/instance not found/i);
   });
 
-  it("drupal_node_get falls back to mcp_tools_get_recent_content when JSON:API is unavailable", async () => {
+  it("drupal_node_get falls back to mcp_tools_get_recent_content when the MCP jsonapi read is unavailable", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
-    // JSON:API down (bundles fetch rejects) → handler falls back to the summary lookup.
-    fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
-    // Response shape after callDrupalMcp unwraps the data envelope: { content: [...] }
-    vi.mocked(callDrupalMcp).mockResolvedValue({ content: [{ id: "5", title: "Hi" }] });
+    // MCP jsonapi read unavailable (mcp_tools_jsonapi disabled / restricted) →
+    // handler falls back to the summary lookup (same /_mcp_tools transport).
+    routeCallDrupalMcp({
+      read: () => {
+        throw new Error("mcp_tools_jsonapi not enabled");
+      },
+      // Response shape after callDrupalMcp unwraps the data envelope: { content: [...] }
+      fallback: () => ({ content: [{ id: "5", title: "Hi" }] }),
+    });
     const result = await (handlers as any).drupal_node_get({
       primitiveName: "drupal_node_get",
       input: { instanceId: "site-1", nodeId: "5" },
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
+    // PRIMARY read attempted first...
     expect(callDrupalMcp).toHaveBeenCalledWith(
       expect.objectContaining({ id: "site-1" }),
-      DRUPAL_NODE_GET_TOOL,
+      DRUPAL_NODE_GET_READ_TOOL,
+      expect.objectContaining({ entity_type: "node", filters: { nid: 5 }, limit: 1 }),
+    );
+    // ...then the summary fallback.
+    expect(callDrupalMcp).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "site-1" }),
+      DRUPAL_NODE_GET_FALLBACK_TOOL,
       expect.objectContaining({ limit: 100 }),
     );
     expect(result).toMatchObject({ id: "5", title: "Hi" });
   });
 
-  it("drupal_node_get throws when node id not in JSON:API or recent list", async () => {
+  it("drupal_node_get throws when node id not in the MCP read or the recent list", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
-    fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
-    vi.mocked(callDrupalMcp).mockResolvedValue({ content: [{ id: "99", title: "Other" }] });
+    // MCP read REACHABLE but node absent (empty items) → falls through to the
+    // summary lookup, which also misses → not-found throw.
+    routeCallDrupalMcp({
+      read: () => mcpListEnvelope(),
+      fallback: () => ({ content: [{ id: "99", title: "Other" }] }),
+    });
     await expect(
       (handlers as any).drupal_node_get({
         primitiveName: "drupal_node_get",
@@ -201,47 +249,35 @@ describe("createDrupalPrimitiveHandlers", () => {
         mode: "agentic",
       }),
     ).rejects.toThrow(/not found/i);
+    // Both the primary read and the fallback were consulted.
+    expect(callDrupalMcp).toHaveBeenCalledWith(expect.anything(), DRUPAL_NODE_GET_READ_TOOL, expect.anything());
+    expect(callDrupalMcp).toHaveBeenCalledWith(expect.anything(), DRUPAL_NODE_GET_FALLBACK_TOOL, expect.anything());
   });
 
-  // ---- The field-level-diff fix: JSON:API full-field read ----
+  // ---- The field-level-diff fix: MCP-primary full-field read (cinatra#1214 S2) ----
   // The agent's STEP 1 read must surface editable before-values (notably the raw
   // `body` source HTML) so STEP 4 can emit a real before/after change set, the
-  // same way the WordPress agent's `wordpress_post_get` full read does.
+  // same way the WordPress agent's `wordpress_post_get` full read does — but over
+  // the Drupal MCP module (mcp_jsonapi_list_entities), NOT a direct /jsonapi/* fetch.
 
-  it("drupal_node_get reads the full node via JSON:API and flattens body.value to a top-level string", async () => {
+  it("drupal_node_get reads the full node over MCP (mcp_jsonapi_list_entities) and flattens body.value to a top-level string", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
-    // 1st fetch: node_type bundle list. 2nd fetch: node/article filtered by nid.
-    fetchMock
-      .mockResolvedValueOnce(
-        jsonApiResponse({
-          data: [
-            { type: "node_type--node_type", id: "u-art", attributes: { drupal_internal__type: "article" } },
-            { type: "node_type--node_type", id: "u-pg", attributes: { drupal_internal__type: "page" } },
-          ],
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonApiResponse({
-          data: [
-            {
-              type: "node--article",
-              id: "uuid-123",
-              attributes: {
-                drupal_internal__nid: 5,
-                title: "Old headline",
-                status: true,
-                body: {
-                  value: "<p>Old body source</p>",
-                  summary: "Old summary",
-                  format: "basic_html",
-                  // `processed` MUST NOT become the before-value (rendered output).
-                  processed: "<p>Old body RENDERED</p>",
-                },
-              },
-            },
-          ],
-        }),
-      );
+    // The MCP module already flattened the compound `body` field to its raw
+    // `.value` in `fields.body` (never the rendered `processed` output — proven
+    // live in the S2 wire capture).
+    routeCallDrupalMcp({
+      read: () =>
+        mcpListEnvelope(
+          serializedNode({
+            id: 5,
+            uuid: "uuid-123",
+            bundle: "article",
+            label: "Old headline",
+            status: true,
+            fields: { title: "Old headline", body: "<p>Old body source</p>", nid: 5 },
+          }),
+        ),
+    });
 
     const result = (await (handlers as any).drupal_node_get({
       primitiveName: "drupal_node_get",
@@ -250,8 +286,19 @@ describe("createDrupalPrimitiveHandlers", () => {
       mode: "agentic",
     })) as any;
 
-    // The summary lookup must NOT be used when JSON:API succeeds.
-    expect(callDrupalMcp).not.toHaveBeenCalled();
+    // The read is a SINGLE MCP call to the jsonapi read tool, filtered by nid.
+    expect(callDrupalMcp).toHaveBeenCalledTimes(1);
+    expect(callDrupalMcp).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "site-1" }),
+      DRUPAL_NODE_GET_READ_TOOL,
+      expect.objectContaining({ entity_type: "node", filters: { nid: 5 }, limit: 1 }),
+    );
+    // The summary fallback must NOT be consulted when the MCP read succeeds.
+    expect(callDrupalMcp).not.toHaveBeenCalledWith(
+      expect.anything(),
+      DRUPAL_NODE_GET_FALLBACK_TOOL,
+      expect.anything(),
+    );
     // Editable before-values are present at the top level for the agent to diff.
     expect(result.id).toBe("5");
     expect(result.nid).toBe(5);
@@ -259,38 +306,22 @@ describe("createDrupalPrimitiveHandlers", () => {
     expect(result.bundle).toBe("article");
     expect(result.title).toBe("Old headline");
     expect(result.status).toBe(true);
-    // body is the RAW source `value`, not the rendered `processed`.
+    // body is the raw source `value` the module surfaced as fields.body.
     expect(result.body).toBe("<p>Old body source</p>");
-    expect(result.body).not.toContain("RENDERED");
-    expect(result.summary).toBe("Old summary");
   });
 
-  it("drupal_node_get JSON:API read iterates bundles until the nid matches", async () => {
+  it("drupal_node_get is bundle-agnostic — one MCP read filtered by nid, no per-bundle enumeration", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
-    fetchMock
-      // bundles: page first, then article
-      .mockResolvedValueOnce(
-        jsonApiResponse({
-          data: [
-            { type: "node_type--node_type", id: "u-pg", attributes: { drupal_internal__type: "page" } },
-            { type: "node_type--node_type", id: "u-art", attributes: { drupal_internal__type: "article" } },
-          ],
-        }),
-      )
-      // page bundle: empty (nid not a page)
-      .mockResolvedValueOnce(jsonApiResponse({ data: [] }))
-      // article bundle: hit
-      .mockResolvedValueOnce(
-        jsonApiResponse({
-          data: [
-            {
-              type: "node--article",
-              id: "uuid-7",
-              attributes: { drupal_internal__nid: 7, title: "Found", body: { value: "B" } },
-            },
-          ],
-        }),
-      );
+    // The node entity query spans every bundle; a page node comes back from the
+    // same single filtered read with no bundle discovery round-trips.
+    routeCallDrupalMcp({
+      read: (args) => {
+        expect(args).toMatchObject({ entity_type: "node", filters: { nid: 7 }, limit: 1 });
+        return mcpListEnvelope(
+          serializedNode({ id: 7, uuid: "uuid-7", bundle: "page", label: "Found", fields: { title: "Found", body: "B", nid: 7 } }),
+        );
+      },
+    });
 
     const result = (await (handlers as any).drupal_node_get({
       primitiveName: "drupal_node_get",
@@ -300,27 +331,22 @@ describe("createDrupalPrimitiveHandlers", () => {
     })) as any;
 
     expect(result.nid).toBe(7);
-    expect(result.bundle).toBe("article");
+    expect(result.bundle).toBe("page");
     expect(result.body).toBe("B");
-    // bundle list + 2 bundle queries = 3 fetches.
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // Exactly one MCP call — the old JSON:API path made a bundle-list + per-bundle
+    // queries; the MCP read collapses that to a single nid-filtered call.
+    expect(callDrupalMcp).toHaveBeenCalledTimes(1);
   });
 
-  it("drupal_node_get JSON:API read defaults body/summary to empty string when the node has no body field", async () => {
+  it("drupal_node_get defaults body/summary to empty string when the node has no body field", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
-    fetchMock
-      .mockResolvedValueOnce(
-        jsonApiResponse({
-          data: [{ type: "node_type--node_type", id: "u-pg", attributes: { drupal_internal__type: "page" } }],
-        }),
-      )
-      .mockResolvedValueOnce(
-        jsonApiResponse({
-          data: [
-            { type: "node--page", id: "uuid-9", attributes: { drupal_internal__nid: 9, title: "Bare page" } },
-          ],
-        }),
-      );
+    routeCallDrupalMcp({
+      read: () =>
+        mcpListEnvelope(
+          // A bare page: fields carries only title/nid, no body.
+          serializedNode({ id: 9, uuid: "uuid-9", bundle: "page", label: "Bare page", fields: { title: "Bare page", nid: 9 } }),
+        ),
+    });
 
     const result = (await (handlers as any).drupal_node_get({
       primitiveName: "drupal_node_get",
@@ -331,10 +357,29 @@ describe("createDrupalPrimitiveHandlers", () => {
 
     expect(result.title).toBe("Bare page");
     expect(result.body).toBe("");
+    // serializeEntity collapses body to its `.value`, so the text-summary
+    // sub-value is not carried over MCP; the flatten defaults summary to "".
     expect(result.summary).toBe("");
   });
 
-  it("drupal_node_get rejects an invalid nodeId BEFORE any read (no JSON:API, no summary fallback)", async () => {
+  it("drupal_node_get falls back to the entity label for title when fields.title is absent", async () => {
+    listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
+    routeCallDrupalMcp({
+      read: () =>
+        mcpListEnvelope(
+          serializedNode({ id: 3, uuid: "uuid-3", bundle: "article", label: "Label headline", fields: { body: "hi", nid: 3 } }),
+        ),
+    });
+    const result = (await (handlers as any).drupal_node_get({
+      primitiveName: "drupal_node_get",
+      input: { instanceId: "site-1", nodeId: "3" },
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    })) as any;
+    expect(result.title).toBe("Label headline");
+  });
+
+  it("drupal_node_get rejects an invalid nodeId BEFORE any read (no MCP read, no summary fallback)", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
     await expect(
       (handlers as any).drupal_node_get({
@@ -344,8 +389,7 @@ describe("createDrupalPrimitiveHandlers", () => {
         mode: "agentic",
       }),
     ).rejects.toThrow(/not a positive integer/i);
-    // Validation throws before the handler touches JSON:API or the summary tool.
-    expect(fetchMock).not.toHaveBeenCalled();
+    // Validation throws before the handler touches the MCP read or the summary tool.
     expect(callDrupalMcp).not.toHaveBeenCalled();
   });
 
