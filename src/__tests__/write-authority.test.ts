@@ -249,37 +249,30 @@ describe("cinatra#409 — per-user write authorization in the Drupal MCP write h
       actor: { actorType: "model", source: "agent" },
       mode: "agentic",
     });
-    // node_get — JSON:API read path (the field-level-diff read). Stub fetch to
-    // return one bundle + one matching node so the read resolves without the
-    // summary fallback. This is a READ, so the write gate must NOT fire.
-    const origFetch = globalThis.fetch;
-    const fetchMock = vi.fn();
-    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
-    try {
-      fetchMock
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({
-            data: [{ type: "node_type--node_type", id: "u-a", attributes: { drupal_internal__type: "article" } }],
-          }),
-        } as unknown as Response)
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          json: async () => ({
-            data: [{ type: "node--article", id: "uuid-5", attributes: { drupal_internal__nid: 5, title: "T", body: { value: "B" } } }],
-          }),
-        } as unknown as Response);
-      await (handlers as any).drupal_node_get({
-        primitiveName: "drupal_node_get",
-        input: { instanceId: "site-A", nodeId: "5" },
-        actor: { actorType: "model", source: "agent" },
-        mode: "agentic",
-      });
-    } finally {
-      globalThis.fetch = origFetch;
-    }
+    // node_get — MCP-primary read (mcp_jsonapi_list_entities; the field-level-diff
+    // read, cinatra#1214 S2). Stub the MCP client to return one matching node so
+    // the read resolves without the summary fallback. This is a READ, so the
+    // write gate must NOT fire.
+    vi.mocked(callDrupalMcp).mockResolvedValueOnce({
+      items: [
+        {
+          entity_type: "node",
+          bundle: "article",
+          id: 5,
+          uuid: "uuid-5",
+          label: "T",
+          status: true,
+          fields: { title: "T", body: "B", nid: 5 },
+        },
+      ],
+      total: 1,
+    });
+    await (handlers as any).drupal_node_get({
+      primitiveName: "drupal_node_get",
+      input: { instanceId: "site-A", nodeId: "5" },
+      actor: { actorType: "model", source: "agent" },
+      mode: "agentic",
+    });
     expect(requireInstanceWriteAuthorityMock).not.toHaveBeenCalled();
   });
 
