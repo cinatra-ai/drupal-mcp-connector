@@ -27,12 +27,18 @@ import type {
   ExtensionHostContext,
   HostDrupalMcpService,
   NangoSystemSurface,
+  ObjectsProvider,
 } from "@cinatra-ai/sdk-extensions";
 import { registerDrupalConnector, type DrupalConnectorDeps } from "./deps";
 import {
   buildDrupalInstanceClient,
   type DrupalConnectionGateSlice,
 } from "./lib/drupal-instances";
+import {
+  buildDrupalPointerActor,
+  writeDrupalNodePointerWith,
+  type DrupalNodePointerState,
+} from "./integration/pointer-writer-core";
 
 const PACKAGE_NAME = "@cinatra-ai/drupal-mcp-connector";
 
@@ -287,6 +293,54 @@ function buildDrupalInstanceAdminProvider(ctx: ExtensionHostContext): DrupalInst
   };
 }
 
+// --- Drupal external-pointer registration (cinatra#1465, epic #1448) ---------
+// The connector's half of the `drupal:node` pointer lifecycle: it WRITES pointer
+// rows for the HOST-registered `@cinatra-ai/drupal:node` type
+// (packages/objects/.../register-types.ts, #1815) through the host objects
+// surface. The TRIGGERS — the node-published webhook sync and the periodic
+// linked→stale→dangling verification sweep — resolve the `drupal-pointer-writer`
+// capability and supply the probe-derived reference state + the org/user the
+// pointer actor is minted from (the twenty-pointer-writer precedent: the
+// connector ships the writer, the host wires the caller). Resolving the objects
+// provider does NO I/O at registration; the impl fails loud at WRITE time if the
+// host never wired the objects surface (an old host), so a pointer is never
+// written unguarded.
+
+/** The host objects-integration service shape (structural mirror — the connector
+ * compiles against any host SDK that meets it; the host binds the real
+ * `objectTypeRegistry` / `objects_save` surface at boot). */
+type HostObjectsIntegrationShape = { getObjectsProvider(): ObjectsProvider | null };
+
+/** Resolve the host objects provider, or null when the host never published the
+ * objects-integration service. */
+function hostObjectsProvider(ctx: ExtensionHostContext): ObjectsProvider | null {
+  const provider = ctx.capabilities.resolveProviders("@cinatra-ai/host:objects-integration")[0];
+  return (provider?.impl as HostObjectsIntegrationShape | undefined)?.getObjectsProvider() ?? null;
+}
+
+/** The `drupal-pointer-writer` capability payload: a node identity + its
+ * probe-derived reference state + the org/user the pointer actor is minted from. */
+export type DrupalPointerWriteRequest = {
+  /** Connected-site (instance) id — the Drupal node id is site-scoped. */
+  instanceId: string;
+  /** Drupal node id (unique within the site). */
+  nodeId: number | string;
+  /** Absolute http(s) URL that opens the node in Drupal. */
+  url: string;
+  /** Probe-derived reference state (defaults `linked`). */
+  state?: DrupalNodePointerState;
+  title?: string;
+  excerpt?: string;
+  /** Upstream version (Drupal node `changed`) for the next probe's diff. */
+  remoteVersion?: string;
+  /** ISO timestamp of the sync that materialized/verified the pointer. */
+  verifiedAt?: string;
+  /** The org the pointer row is scoped to (REQUIRED — objects_save rejects a null org). */
+  orgId: string;
+  /** The user, when the trigger is user-attributed. */
+  userId?: string | null;
+};
+
 export function register(ctx: ExtensionHostContext): void {
   // Transport-DI inversion: bind the host deps slot. Always-bind (the
   // bind-if-absent skew guard was swept once every host this connector can
@@ -317,5 +371,29 @@ export function register(ctx: ExtensionHostContext): void {
   ctx.capabilities.registerProvider("@cinatra-ai/host:drupal-mcp", {
     packageName: PACKAGE_NAME,
     impl: buildDrupalInstanceAdminProvider(ctx),
+  });
+
+  // cinatra#1465 — the connector-owned `drupal:node` pointer writer. The host
+  // sync/webhook trigger resolves this capability and supplies the node identity
+  // + probe-derived reference state + org/user; the impl mints the pointer actor
+  // and upserts the pointer row (idempotent by instance + node id) through the
+  // host objects surface. Building the impl does NO host-service resolution and
+  // NO I/O (probe-safe) — the objects provider resolves lazily at write time.
+  ctx.capabilities.registerProvider("drupal-pointer-writer", {
+    packageName: PACKAGE_NAME,
+    impl: {
+      writePointer: async (request: DrupalPointerWriteRequest) => {
+        const provider = hostObjectsProvider(ctx);
+        if (!provider) {
+          throw new Error(`${PACKAGE_NAME}: host objects surface is not wired`);
+        }
+        const { orgId, userId, ...pointer } = request;
+        return writeDrupalNodePointerWith(
+          provider,
+          pointer,
+          buildDrupalPointerActor({ orgId, userId: userId ?? null }),
+        );
+      },
+    },
   });
 }
