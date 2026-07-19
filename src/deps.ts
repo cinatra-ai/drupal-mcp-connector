@@ -61,6 +61,56 @@ export type DrupalDispatchContentEditorInput = {
    * bypass). Always `@cinatra-ai/drupal-agent` for this connector.
    */
   packageName: string;
+  /**
+   * S5 delegated-widget OBO override (cinatra public-site-widget path). Set by
+   * `drupal_content_editor_run` ONLY when the active turn is driven by a trusted
+   * `public_site_widget` delegated actor (§5 G1/G4 of the S5-W1
+   * OBO-widget-principal design). When present, the host binding MUST forward it
+   * verbatim to `dispatchContentEditorViaA2A` so the carrier `agent_run` is
+   * created AS THE END USER (`runBy`) against the SERVER-PINNED `instanceId`,
+   * with `sourceType:"public_site_widget"` stamped so the downstream bridge
+   * suppresses the platform-admin bypass and the CMS write authorizes on the
+   * per-instance write-authority gate — never install/single-tenant/anonymous
+   * identity, no privilege widening. ABSENT on the normal (non-widget) agent
+   * path → the dispatch is byte-identical to today (production agent-run OBO). */
+  actorOverride?: WidgetActorOverride;
+};
+
+/**
+ * The delegated-widget OBO override the content-editor dispatch carries on the
+ * `public_site_widget` path. Field-for-field the shape the host dispatch seam
+ * (`src/lib/host-content-editor-dispatch.ts`, cinatra#408) already accepts, so
+ * the host binding threads it straight through with no re-mapping:
+ *   • `runBy`      — the authenticated END-USER id (never the install identity).
+ *   • `orgId`      — the widget user's org scope.
+ *   • `instanceId` — the SERVER-PINNED canonical instance (verified-origin
+ *                    re-pin); the write target, never a model-forgeable value.
+ *   • `sourceType` — fixed `"public_site_widget"` discriminator.
+ */
+export type WidgetActorOverride = {
+  runBy: string;
+  orgId: string;
+  instanceId: string;
+  sourceType: "public_site_widget";
+};
+
+/**
+ * Trusted delegated-widget actor context for the ACTIVE MCP request frame
+ * (cinatra S5-W1). Resolved host-side from the SAME trusted frame
+ * `requireInstanceWriteAuthority` reads (`resolveExtensionActorContext()`),
+ * NEVER from connector tool input or the SDK `request.actor` field.
+ */
+export type WidgetActorContext = {
+  /** Fixed discriminator — this turn is a `public_site_widget` delegation. A
+   * non-null context is ALWAYS a widget-delegated call by construction. */
+  delegation: "public_site_widget";
+  /** Authenticated END-USER id (the carrier run's `runBy`). */
+  runBy: string;
+  /** Org scope (the `cwu_` claim; never session-derived). */
+  orgId: string;
+  /** SERVER-PINNED canonical instance (verified-origin re-pin). The model's
+   * tool-arg `instanceId` MUST equal this or the write is refused. */
+  instanceId: string;
 };
 
 /**
@@ -169,6 +219,30 @@ export interface DrupalConnectorDeps {
   buildListPage: <T>(items: T[], total: number, offset: number, limit: number) => ListPage<T>;
   /** A2A blocking dispatch — returns the agent's reply text (host-bound). */
   dispatchContentEditor: (input: DrupalDispatchContentEditorInput) => Promise<string>;
+  /**
+   * S5 delegated-widget OBO seam (cinatra S5-W1). Resolves the trusted
+   * `public_site_widget` delegated actor for the ACTIVE MCP request frame, or
+   * `null` on the normal (non-widget) agent path. Host-derived ONLY — the SAME
+   * trusted request frame `requireInstanceWriteAuthority` reads
+   * (`resolveExtensionActorContext()`), NEVER connector tool input or the SDK
+   * `request.actor` field.
+   *
+   * `drupal_content_editor_run` consumes it: when it returns a
+   * `public_site_widget` context the handler (a) FAIL-CLOSED asserts the model's
+   * tool-arg `instanceId` === the pinned `instanceId` (`instance_pin_mismatch`)
+   * — closing the model-chosen-instance loosening the LLM+MCP hop introduces —
+   * and (b) reconstructs `actorOverride {runBy, orgId, instanceId, sourceType:
+   * "public_site_widget"}` from THIS trusted actor (never route/tool state) and
+   * threads it into `dispatchContentEditor`.
+   *
+   * OPTIONAL for skew: a pre-S5 host that never mints a widget delegation leaves
+   * this UNBOUND; the handler's `?.() ?? null` then yields the non-widget path,
+   * byte-identical to today. CONTRACT: the CORE WAVE that introduces the
+   * `public_site_widget` MCP delegation MUST bind this resolver in the SAME
+   * change — otherwise a widget-delegated turn would silently run under the
+   * install identity instead of the end user (a parity gap, not a loosening).
+   */
+  resolveWidgetActor?: () => WidgetActorContext | null;
   /** Nango-vault bearer header for the Drupal MCP HTTP client (host-bound). */
   buildNangoBearerHeader: (
     input: DrupalNangoBearerHeaderInput,

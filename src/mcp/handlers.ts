@@ -7,7 +7,12 @@ import { callDrupalMcp } from "../lib/drupal-mcp-client";
 // resolved via DI so this package carries no non-SDK `@cinatra-ai/*` code
 // dependency and no `@/` host-internal edge.
 import { getDrupalDeps, listMcpInstancesSorted } from "../deps";
-import type { DrupalMcpInstance, DrupalMcpPublicInstance } from "../deps";
+import type {
+  DrupalMcpInstance,
+  DrupalMcpPublicInstance,
+  WidgetActorContext,
+  WidgetActorOverride,
+} from "../deps";
 
 // READ-BOUNDARY redaction. A read/list primitive must NEVER emit the Nango
 // credential binding. This projection drops `nangoConnectionId` +
@@ -142,6 +147,44 @@ async function requireWriteAuthority(instanceId: string, primitiveName: string):
   // Throws on deny (non-member / member-without-right / null actor / cross-org
   // instance / platform-admin on the widget path). Resolving == authorized.
   await gate({ instanceId, primitiveName });
+}
+
+// S5 delegated-widget OBO reconstruction (cinatra S5-W1 §5 G3/G4). Build the
+// carrier-run actor override from the TRUSTED widget actor context the host
+// derives from the MCP request frame — NEVER from tool input. Fail-closed:
+//   • a `public_site_widget` delegation MISSING pinned fields (blank runBy /
+//     orgId / instanceId) is a malformed delegation → THROW (never fall through
+//     to the normal identity path — the "missing override on a widget call"
+//     negative case);
+//   • G3 INSTANCE PIN — the model-supplied tool-arg `toolInstanceId` MUST equal
+//     the actor's SERVER-PINNED `instanceId`, else `instance_pin_mismatch` (a
+//     prompt-injected / confused-model attempt to target a different
+//     origin-matched instance in the same org is refused, no write).
+// The returned override drives `dispatchContentEditor`'s `actorOverride`, so the
+// carrier run authorizes AS THE END USER against the pinned instance with the
+// platform-admin-suppressing `sourceType`.
+function buildWidgetActorOverride(
+  actor: WidgetActorContext,
+  toolInstanceId: string,
+  primitiveName: string,
+): WidgetActorOverride {
+  if (!actor.runBy || !actor.orgId || !actor.instanceId) {
+    throw new Error(
+      `${primitiveName} denied: public_site_widget delegation is missing the pinned actor fields (runBy/orgId/instanceId).`,
+    );
+  }
+  if (toolInstanceId !== actor.instanceId) {
+    throw new Error(
+      `instance_pin_mismatch: ${primitiveName} tool-arg instanceId "${toolInstanceId}" ` +
+        "does not match the widget actor's server-pinned instance.",
+    );
+  }
+  return {
+    runBy: actor.runBy,
+    orgId: actor.orgId,
+    instanceId: actor.instanceId,
+    sourceType: "public_site_widget",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -434,12 +477,26 @@ export function createDrupalPrimitiveHandlers() {
     // package. timeoutMs: 300_000 aligns with the Cinatra /chat blocking budget.
     drupal_content_editor_run: async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = drupalContentEditorRunSchema.parse(request.input);
+      const deps = getDrupalDeps();
+
+      // S5 delegated-widget OBO reconstruction (cinatra S5-W1). When the turn is
+      // driven by a trusted `public_site_widget` delegated actor, the downstream
+      // CMS write must authorize AS THE END USER against the SERVER-PINNED
+      // instance. Read the actor context the host derives from the MCP request
+      // frame (NEVER from tool input); `null` on the normal (non-widget) agent
+      // path, where the dispatch stays byte-identical to today. On the widget
+      // path `buildWidgetActorOverride` fail-closes on a missing pin field and
+      // asserts the tool-arg instance pin (G3) before the override is built.
+      const widgetActor = deps.resolveWidgetActor?.() ?? null;
+      const actorOverride: WidgetActorOverride | undefined = widgetActor
+        ? buildWidgetActorOverride(widgetActor, input.instanceId, "drupal_content_editor_run")
+        : undefined;
 
       const a2aUrl =
         process.env.DRUPAL_CONTENT_EDITOR_A2A_URL ??
         "http://localhost:3010/agents/cinatra-ai/drupal-agent";
 
-      const text = await getDrupalDeps().dispatchContentEditor({
+      const text = await deps.dispatchContentEditor({
         agentUrl: a2aUrl,
         // #72 payload-contract parity: pass the validated `input` OBJECT (the
         // host serializes it as the A2A message text), matching the WordPress
@@ -450,6 +507,9 @@ export function createDrupalPrimitiveHandlers() {
         // OBO agent_run so the CMS write authorizes via the production agent-run
         // OBO path (not the dev-admin bypass).
         packageName: "@cinatra-ai/drupal-agent",
+        // S5: present ONLY on the public_site_widget path (undefined omits the
+        // key entirely, so the non-widget dispatch is byte-identical to today).
+        ...(actorOverride ? { actorOverride } : {}),
       });
 
       // Strip code fences before JSON.parse.
