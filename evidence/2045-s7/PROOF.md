@@ -50,18 +50,27 @@ Comment decision bar.
 
 ![D2 — the review gate on the run-embedded surface, snapshot pinned](./D2-review-surface-gate-pending.png)
 
-**Floor state, as expected.** The target's CONTENT preview floors — *"review
-target unavailable — slot "detail", reason "unknown-or-tombstoned"* — and a UI
-decision is refused with *"A reviewed revision is no longer live"*, because the
-`application/vnd.cinatra.cms-fields+json` renderer
-(`cinatra-ai/cms-snapshot-artifact`, merged in its own repo) is **not yet
-dev-enrolled on cinatra main** — the enrollment step named in #2100's merge order.
-This is the pinned-target floor state, not a trigger gap: the same floor is
-recorded by #2082 and by the WordPress S5 lane. The decision below therefore rides
-the store engine (`commitReviewDecision`), exactly as the merged WordPress host
-lane did.
+**Floor state — and the grounded reason.** The target's CONTENT preview floors —
+*"review target unavailable — slot "detail", reason "unknown-or-tombstoned"* — and
+a UI decision is refused with *"A reviewed revision is no longer live"*.
 
-![D2b — the UI decision blocked by the not-yet-enrolled snapshot renderer](./D2b-ui-decide-blocked-floor.png)
+D2 was re-run AFTER the CMS-snapshot renderer enrollment landed on cinatra main
+(#2101, merged during this lane) with the renderer extension present in the dev
+checkout — **it still floors**, and the reason is upstream of this connector:
+
+> the core capture writer persists the snapshot resource's `mime` as the blob
+> store's **DETECTED** type (`text/plain` for the JSON field serialization), not
+> the **declared** `application/vnd.cinatra.cms-fields+json`. #2100's
+> representation-dispatch fallback keys on `(orgId, mime)`, so it can never match
+> the CMS-snapshot renderer. Verified on this stack: `resource.mime = text/plain`
+> while `objects.data.mime = application/vnd.cinatra.cms-fields+json`.
+
+That is a **core / #2044 rendering-side item affecting WordPress identically**
+(same writer, same MIME path) — not a trigger gap. The approval below therefore
+rides the store engine (`commitReviewDecision`), exactly as the merged WordPress
+host lane's proof did.
+
+![D2b — the UI decision blocked while the snapshot target floors](./D2b-ui-decide-blocked-floor.png)
 
 ## D3 — approve releases the effect → Drupal changes → read-back `verified`
 
