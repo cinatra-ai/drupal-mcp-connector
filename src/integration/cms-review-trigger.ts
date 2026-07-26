@@ -147,10 +147,43 @@ export function canonicalizeFieldValue(path: string, value: unknown): string | u
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   try {
-    return JSON.stringify(value);
+    return stableStringify(value);
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Recursive, key-SORTED JSON serialization. A plain `JSON.stringify` preserves
+ * insertion order, so the SAME Drupal field value arriving with differently
+ * ordered object keys (capture vs post-apply re-read) would hash differently —
+ * a phantom operation-id split and phantom read-back drift (a codex convergence
+ * finding). PURE.
+ */
+export function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v)).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
+}
+
+/**
+ * The proposal keys the review CANNOT represent as a snapshot field: an
+ * identity/volatile system path, or a value with no canonical string form (e.g.
+ * an explicit `null` field clear, which Drupal APPLIES but the flat string
+ * snapshot cannot carry). PURE.
+ *
+ * These are the fence-ON fail-closed set: letting them through would mutate
+ * Drupal with NO captured review target (a codex convergence finding). The
+ * WordPress sibling has no equivalent because its write schema is four typed
+ * string fields; Drupal's is an open `Record<string, unknown>`.
+ */
+export function unreviewableProposalPaths(proposed: DrupalRawNode): string[] {
+  return Object.keys(proposed)
+    .filter((p) => SYSTEM.has(p) || typeof canonicalizeFieldValue(p, proposed[p]) !== "string")
+    .sort();
 }
 
 /**
@@ -246,12 +279,27 @@ export function deriveCmsOperationId(input: {
   resourceType: string;
   cmsResourceId: string;
   proposedSerialization: string;
+  /** The AUTHORIZED scope (the changed paths). Bound into the key so two
+   * proposals that reach the same final state from DIFFERENT bases — and
+   * therefore authorize different field sets — can never share one gate (a codex
+   * convergence finding). */
+  scopePaths: readonly string[];
+  /** The CAS anchor over the base the proposal was computed against. A
+   * third-party edit between capture and re-drive changes it, so the re-drive
+   * mints a NEW target instead of riding an approval taken against a stale base. */
+  baseRemoteRevisionRef: string;
+  /** `"update"` | `"publish"` — the two staged-write seams are distinct effects
+   * even when their proposed state coincides. */
+  effect: string;
 }): string {
   return sha256Hex(
     [
       input.instanceId,
       input.resourceType,
       input.cmsResourceId,
+      input.effect,
+      [...input.scopePaths].sort().join(","),
+      input.baseRemoteRevisionRef,
       sha256Hex(input.proposedSerialization),
     ].join(" "),
   );
@@ -278,15 +326,21 @@ export function buildStagedWriteCapture(input: {
   changedPaths: readonly string[];
   capturedAt: string;
   connectorId?: string;
+  /** The staged-write seam this capture belongs to. */
+  effect?: StagedWriteEffect;
 }): CmsReviewCaptureInput {
   const proposedSerialization = serializeCmsFields(input.proposedState);
   const currentSerialization = serializeCmsFields(input.currentState);
   const cmsResourceId = String(input.nodeId);
+  const baseRemoteRevisionRef = sha256Hex(currentSerialization);
   const operationId = deriveCmsOperationId({
     instanceId: input.instanceId,
     resourceType: input.resourceType,
     cmsResourceId,
     proposedSerialization,
+    scopePaths: input.changedPaths,
+    baseRemoteRevisionRef,
+    effect: input.effect ?? "update",
   });
   const title = input.proposedState.title ?? input.currentState.title;
   return {
@@ -311,8 +365,9 @@ export function buildStagedWriteCapture(input: {
     cmsResourceId,
     // CAS anchor over the CURRENT remote node — lets the apply/rebase path detect
     // a third-party edit between capture and apply (the staging-saga follow-up
-    // reads it).
-    baseRemoteRevisionRef: sha256Hex(currentSerialization),
+    // reads it), and binds the operation id above to the base it was computed
+    // against.
+    baseRemoteRevisionRef,
     operationId,
     ...(title ? { title } : {}),
   };
@@ -333,6 +388,11 @@ export type DrupalPendingReviewResult = {
   url: string;
   message: string;
 };
+
+/** The two staged-write seams this trigger guards. Drupal splits the publish
+ * effect into its own primitive (WordPress folds it into the content update), so
+ * the effect is part of an operation's identity. */
+export type StagedWriteEffect = "update" | "publish";
 
 /** The trigger's decision the handler acts on. */
 export type StagedNodeWriteDecision =
@@ -378,6 +438,8 @@ export async function evaluateStagedNodeWrite(args: {
    * fence-off path adds no Drupal round-trip). MUST be the full-field read: a
    * degraded summary row has no `body`, so it can never be a review base. */
   fetchCurrent: () => Promise<DrupalRawNode | null>;
+  /** Which staged-write seam is calling (defaults to the content update). */
+  effect?: StagedWriteEffect;
   /** Injectable clock for deterministic tests. */
   now?: () => Date;
 }): Promise<StagedNodeWriteDecision> {
@@ -401,6 +463,25 @@ export async function evaluateStagedNodeWrite(args: {
   const resourceType = typeof current.bundle === "string" && current.bundle.length > 0
     ? String(current.bundle)
     : "node";
+
+  // FAIL CLOSED on a proposal the review cannot represent (an identity/volatile
+  // system path, or a value with no canonical string form such as an explicit
+  // `null` field clear). Drupal WOULD apply those, but they can never appear in
+  // the snapshot — so without this arm a fence-ON write could reach Drupal with
+  // NOTHING captured (a codex convergence finding). Checked BEFORE the
+  // nothing-changed pass so such a proposal can never slip through it.
+  const unreviewable = unreviewableProposalPaths(args.proposed);
+  if (unreviewable.length > 0) {
+    return {
+      action: "reject",
+      operationId: "",
+      reason:
+        `the proposed field(s) ${unreviewable.join(", ")} cannot be represented as a review ` +
+        "target (identity/volatile path, or a value with no canonical form) — refusing a " +
+        "review-gated write fail-closed",
+    };
+  }
+
   const { currentState, proposedState, changedPaths } = resolveProposedState(current, args.proposed);
   // Nothing the review reasons over actually changes → let the write proceed (it
   // will no-op or the writer's own guard rejects it) — no empty gate.
@@ -415,6 +496,7 @@ export async function evaluateStagedNodeWrite(args: {
     proposedState,
     changedPaths,
     capturedAt: (args.now ? args.now() : new Date()).toISOString(),
+    effect: args.effect ?? "update",
     ...(args.connectorId ? { connectorId: args.connectorId } : {}),
   });
 
@@ -445,7 +527,20 @@ export async function evaluateStagedNodeWrite(args: {
         },
       };
     case "approved":
-      if (!gate) return { action: "pass" };
+      // An `approved` disposition with NO gate reference is incoherent: the
+      // read-back binding needs the gate, so letting the write through would
+      // apply an approved effect with no verification record. FAIL CLOSED (a
+      // codex convergence finding; a deliberate hardening over the WordPress
+      // sibling, which passes here).
+      if (!gate) {
+        return {
+          action: "reject",
+          operationId: captureInput.operationId,
+          reason:
+            "the review disposition resolved approved but carries no gate reference — refusing " +
+            "the write fail-closed (an approved effect must be verifiable)",
+        };
+      }
       // The read-back projects EXACTLY the key set the snapshot stored (the
       // verdict compares base↔repaired path-by-path, so a wider or narrower
       // projection would manufacture drift).

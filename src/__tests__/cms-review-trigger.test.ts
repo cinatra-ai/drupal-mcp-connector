@@ -12,6 +12,8 @@ import {
   resolveProposedState,
   resolveReviewablePaths,
   serializeCmsFields,
+  stableStringify,
+  unreviewableProposalPaths,
   CMS_REVIEW_SNAPSHOT_MIME,
   DRUPAL_STATUS_PUBLISHED,
   DRUPAL_STATUS_UNPUBLISHED,
@@ -157,19 +159,53 @@ describe("resolveProposedState", () => {
 });
 
 describe("deriveCmsOperationId", () => {
-  const base = { instanceId: "site-1", resourceType: "article", cmsResourceId: "7" };
+  const base = {
+    instanceId: "site-1",
+    resourceType: "article",
+    cmsResourceId: "7",
+    scopePaths: ["title"],
+    baseRemoteRevisionRef: "base-1",
+    effect: "update",
+    proposedSerialization: '{"title":"T"}',
+  };
 
-  it("is deterministic for an identical proposal", () => {
-    expect(deriveCmsOperationId({ ...base, proposedSerialization: '{"title":"T"}' })).toBe(
-      deriveCmsOperationId({ ...base, proposedSerialization: '{"title":"T"}' }),
-    );
+  it("is deterministic for an identical proposal against the same base", () => {
+    expect(deriveCmsOperationId(base)).toBe(deriveCmsOperationId({ ...base }));
   });
 
   it("differs for a different proposal, node, and instance", () => {
-    const a = deriveCmsOperationId({ ...base, proposedSerialization: '{"title":"T"}' });
+    const a = deriveCmsOperationId(base);
     expect(deriveCmsOperationId({ ...base, proposedSerialization: '{"title":"U"}' })).not.toBe(a);
-    expect(deriveCmsOperationId({ ...base, cmsResourceId: "8", proposedSerialization: '{"title":"T"}' })).not.toBe(a);
-    expect(deriveCmsOperationId({ ...base, instanceId: "site-2", proposedSerialization: '{"title":"T"}' })).not.toBe(a);
+    expect(deriveCmsOperationId({ ...base, cmsResourceId: "8" })).not.toBe(a);
+    expect(deriveCmsOperationId({ ...base, instanceId: "site-2" })).not.toBe(a);
+  });
+
+  it("binds the AUTHORIZED scope, the base, and the effect (no cross-authorization reuse)", () => {
+    const a = deriveCmsOperationId(base);
+    // Same final state, DIFFERENT authorized scope → a different operation.
+    expect(deriveCmsOperationId({ ...base, scopePaths: ["title", "body"] })).not.toBe(a);
+    // Same final state computed against a THIRD-PARTY-changed base → different.
+    expect(deriveCmsOperationId({ ...base, baseRemoteRevisionRef: "base-2" })).not.toBe(a);
+    // The publish seam is a distinct effect from the content update.
+    expect(deriveCmsOperationId({ ...base, effect: "publish" })).not.toBe(a);
+  });
+
+  it("is scope-order independent", () => {
+    expect(deriveCmsOperationId({ ...base, scopePaths: ["body", "title"] })).toBe(
+      deriveCmsOperationId({ ...base, scopePaths: ["title", "body"] }),
+    );
+  });
+});
+
+describe("stableStringify / unreviewableProposalPaths", () => {
+  it("serializes nested object keys in a stable order", () => {
+    expect(stableStringify({ b: 1, a: { d: 2, c: 3 } })).toBe(stableStringify({ a: { c: 3, d: 2 }, b: 1 }));
+  });
+
+  it("flags identity/volatile paths and values with no canonical form", () => {
+    expect(unreviewableProposalPaths({ title: "T" })).toEqual([]);
+    expect(unreviewableProposalPaths({ body: null })).toEqual(["body"]);
+    expect(unreviewableProposalPaths({ uid: 5, title: "T" })).toEqual(["uid"]);
   });
 });
 
@@ -224,8 +260,10 @@ describe("buildStagedWriteCapture", () => {
       proposedState: { title: "New title" },
     });
     expect(a.baseRemoteRevisionRef).not.toBe(b.baseRemoteRevisionRef);
-    // …while the operation id stays keyed to the PROPOSAL (idempotent re-drive).
-    expect(a.operationId).toBe(b.operationId);
+    // …and the operation id is BOUND to that base, so a re-drive against a
+    // third-party-changed base mints a NEW target instead of riding an approval
+    // taken against the stale one (a codex convergence finding).
+    expect(a.operationId).not.toBe(b.operationId);
   });
 });
 

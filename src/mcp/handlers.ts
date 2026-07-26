@@ -566,6 +566,7 @@ export function createDrupalPrimitiveHandlers() {
         siteUrl: instance.siteUrl,
         nodeId: nid,
         proposed: { status: DRUPAL_STATUS_PUBLISHED },
+        effect: "publish",
         fetchCurrent: () => readNodeForReview(instance, nid),
       });
       if (review.action === "hold") return review.pending;
