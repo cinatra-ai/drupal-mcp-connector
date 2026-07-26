@@ -13,6 +13,13 @@ import type {
   WidgetActorContext,
   WidgetActorOverride,
 } from "../deps";
+import {
+  evaluateStagedNodeWrite,
+  projectNodeFields,
+  DRUPAL_STATUS_PUBLISHED,
+  type DrupalRawNode,
+  type StagedNodeWriteDecision,
+} from "../integration/cms-review-trigger";
 
 // READ-BOUNDARY redaction. A read/list primitive must NEVER emit the Nango
 // credential binding. This projection drops `nangoConnectionId` +
@@ -291,6 +298,61 @@ async function readNodeViaMcp(
 }
 
 // ---------------------------------------------------------------------------
+// S7 review-before-publish plumbing (cinatra#2045, epic #2037).
+//
+// The trigger LEAF (`../integration/cms-review-trigger`) owns the pure decision;
+// these two helpers are the only I/O the seam needs from the handler layer:
+// the review-grade current-node read, and the INDEPENDENT post-apply re-read that
+// feeds the read-back verifier.
+// ---------------------------------------------------------------------------
+
+/** Review-grade current-node read. FULL-FIELD ONLY (`mcp_jsonapi_list_entities`)
+ * — never the `mcp_tools_get_recent_content` summary fallback `drupal_node_get`
+ * degrades to, because a summary row carries NO `body`: capturing it as the review
+ * base would review a body the reviewer never saw and make every apply read as
+ * drift. Returns null on absence OR unavailability so the trigger fails closed. */
+async function readNodeForReview(
+  instance: DrupalMcpInstance,
+  nid: number,
+): Promise<DrupalRawNode | null> {
+  try {
+    return await readNodeViaMcp(instance, nid);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Record the post-apply read-back verification for an APPROVED, applied staged
+ * write. The re-read is INDEPENDENT (a fresh `mcp_jsonapi_list_entities`, NOT the
+ * write response): the update reply echoes what the write requested, so it could
+ * never surface a SITE-MODULE REWRITE-ON-SAVE — re-reading the persisted node is
+ * what lets the verifier catch an out-of-scope rewrite as `drifted`.
+ */
+async function recordApplyReadback(
+  instance: DrupalMcpInstance,
+  nid: number,
+  review: Extract<StagedNodeWriteDecision, { action: "apply" }>,
+): Promise<Record<string, unknown>> {
+  const seam = getDrupalDeps().cmsReview;
+  if (!seam) return { operationId: review.operationId, ok: false, code: "seam-unbound" };
+  const postApply = await readNodeForReview(instance, nid);
+  if (!postApply) {
+    return { operationId: review.operationId, ok: false, code: "post-apply-read-unavailable" };
+  }
+  const readback = await seam.recordApplyVerification({
+    operationId: review.operationId,
+    gateId: review.gate.gateId,
+    runId: review.gate.runId,
+    // Project EXACTLY the key set the snapshot stored — the verdict compares the
+    // approved proposal to this map path-by-path, so a wider/narrower projection
+    // would manufacture drift.
+    postApplyFields: projectNodeFields(postApply, review.snapshotPaths),
+  });
+  return { operationId: review.operationId, ...readback };
+}
+
+// ---------------------------------------------------------------------------
 // Handler factory
 // ---------------------------------------------------------------------------
 
@@ -395,10 +457,39 @@ export function createDrupalPrimitiveHandlers() {
       if (Object.keys(safeFields).length === 0) {
         throw new Error("All submitted fields were empty strings — nothing to update.");
       }
-      return callDrupalMcp(instance, TOOL.UPDATE, {
+
+      // cinatra#2045 S7 — review-before-publish TRIGGER at the staged content-write
+      // seam. When the host review fence is ON, the PROPOSED node state is captured
+      // as an immutable review target and the effect is HELD before it can reach
+      // Drupal; only an approved gate releases the apply. FENCE-OFF / no seam bound
+      // → `{action:"pass"}` with no capture and no extra read, so the write below is
+      // byte-identical to pre-S7. Placed AFTER the empty-field sanitation so the
+      // reviewed proposal is exactly the field map the write would send.
+      const review = await evaluateStagedNodeWrite({
+        seam: getDrupalDeps().cmsReview,
+        instanceId: input.instanceId,
+        siteUrl: instance.siteUrl,
+        nodeId: nid,
+        proposed: safeFields,
+        fetchCurrent: () => readNodeForReview(instance, nid),
+      });
+      // HELD: the effect is held pending review — the write does NOT reach Drupal.
+      if (review.action === "hold") return review.pending;
+      // REJECTED (or a fail-closed refusal): a tombstoned effect never writes.
+      if (review.action === "reject") {
+        throw new Error(`drupal_node_update: ${review.reason}`);
+      }
+
+      // PASS (fence off / org-ungated / nothing to review) or APPLY (an approved
+      // gate released the effect). Either way the write proceeds, unchanged.
+      const applied = await callDrupalMcp(instance, TOOL.UPDATE, {
         nid: String(nid),
         updates: safeFields,
       });
+      if (review.action === "apply") {
+        return { applied, review: await recordApplyReadback(instance, nid, review) };
+      }
+      return applied;
     },
 
     drupal_node_create_draft_revision: async (request: ExtensionPrimitiveRequest<unknown>) => {
@@ -459,10 +550,37 @@ export function createDrupalPrimitiveHandlers() {
       if (!Number.isFinite(nid) || nid <= 0) {
         throw new Error(`Invalid nodeId: "${input.nodeId}" is not a positive integer`);
       }
-      return callDrupalMcp(instance, TOOL.PUBLISH, {
+
+      // cinatra#2045 S7 — the SAME review trigger at the PUBLISH seam. This is the
+      // one place Drupal genuinely diverges from the WordPress sibling: WordPress
+      // publishes through `wordpress_post_update` (`status` is just another field
+      // in the reviewed proposal), while Drupal's publish effect is its own
+      // primitive. Without the trigger here, "no remote mutation of published
+      // content before approval" (the issue AC) would have a hole the WordPress
+      // connector does not have — an agent could stage content for review and then
+      // make it externally visible with an unreviewed publish call. The proposal is
+      // the status transition itself; the scope manifest is `{paths:["status"]}`.
+      const review = await evaluateStagedNodeWrite({
+        seam: getDrupalDeps().cmsReview,
+        instanceId: input.instanceId,
+        siteUrl: instance.siteUrl,
+        nodeId: nid,
+        proposed: { status: DRUPAL_STATUS_PUBLISHED },
+        fetchCurrent: () => readNodeForReview(instance, nid),
+      });
+      if (review.action === "hold") return review.pending;
+      if (review.action === "reject") {
+        throw new Error(`drupal_node_publish: ${review.reason}`);
+      }
+
+      const applied = await callDrupalMcp(instance, TOOL.PUBLISH, {
         nid: String(nid),
         publish: true,
       });
+      if (review.action === "apply") {
+        return { applied, review: await recordApplyReadback(instance, nid, review) };
+      }
+      return applied;
     },
 
     // A2A blocking dispatch to wayflow-drupal-content-editor.
