@@ -214,6 +214,154 @@ export type RequireInstanceWriteAuthorityInput = {
   primitiveName: string;
 };
 
+// ---------------------------------------------------------------------------
+// S7 CMS content-review seam (cinatra#2045, epic #2037 S7 — the Drupal CONNECTOR
+// half; the WordPress sibling is wordpress-mcp-connector#84).
+//
+// The CORE half is already on cinatra main and is CONTENT-AGNOSTIC:
+// `captureCmsContentSnapshot` (#2082 — the one-Tx snapshot substrate + produced
+// event + `cms_snapshot_targets` apply-binding) and `recordCmsApplyVerification`
+// (the read-back verifier bound to the STORED scope manifest), published to
+// extensions as `@cinatra-ai/host:cms-review` (#2084). Both are host-internal
+// `@/lib` / `@cinatra-ai/` server modules — the connector can NEVER import them
+// (the `@/` alias does not resolve in the standalone package build, the whole
+// reason for this deps-DI slot), so `register.ts` binds the published capability
+// into this OPTIONAL `cmsReview` member.
+//
+// FENCE / SKEW POSTURE — byte-identity when off: the member is OPTIONAL. A host
+// that predates S5 (or a standalone build) leaves it UNBOUND → the write path is
+// byte-identical to pre-S7 (equivalent to the review fence being OFF). When bound
+// the connector still consults `isReviewActive()` (the host's
+// `isLifecycleReviewOrchestrationActive()` fence, DEFAULT-OFF) on every write:
+// false → byte-identical pass-through, no capture, no extra read; true → the
+// staged node write is CAPTURED and HELD before it can reach Drupal.
+//
+// IDENTITY: the connector passes ONLY the non-identity write coordinates (the
+// pointer, the proposed content, the scope manifest, the resource + operation
+// ids). The host derives org / run / actor from the active MCP request frame
+// (exactly as `requireInstanceWriteAuthority` does) — identity is NEVER connector
+// input.
+// ---------------------------------------------------------------------------
+
+/** The closed set of field paths the review authorizes the apply to change.
+ * Stored on `cms_snapshot_targets.scope_manifest`; read BACK by the verifier so
+ * the apply can never widen what the capture-time review fixed. */
+export type CmsReviewScopeManifest = { paths: string[] };
+
+/** The external-pointer identity of the CMS target being staged (the objects
+ * `connector-ref` pointer shape the core capture reshapes via
+ * `buildConnectorRefSnapshotArtifact`). Bare identity only — never the body. */
+export type CmsReviewPointer = {
+  url: string;
+  connectorId: string;
+  externalId: string;
+  resolvedMimeType: string;
+  state: "linked" | "stale" | "dangling";
+  title?: string;
+  excerpt?: string;
+  remoteVersion?: string;
+};
+
+/** The resolved PROPOSED content the connector stages (exactly one of text /
+ * bytesBase64 — the CMS field serialization is text). */
+export type CmsReviewResolvedContent = {
+  mime: string;
+  text?: string;
+  bytesBase64?: string;
+  sizeBytes?: number;
+  title?: string;
+};
+
+/** The non-identity coordinates of a staged CMS content write the connector
+ * hands the host capture seam. */
+export type CmsReviewCaptureInput = {
+  pointer: CmsReviewPointer;
+  /** The PROPOSED node state (the review target the human approves). */
+  resolved: CmsReviewResolvedContent;
+  /** ISO capture timestamp (audit/correlation). */
+  capturedAt: string;
+  scopeManifest: CmsReviewScopeManifest;
+  /** The connector instance the write targets. */
+  connectorInstance: string;
+  /** The Drupal node BUNDLE (`article`, `page`, …) — the CMS resource class; the
+   * WordPress sibling passes `"post"`/`"page"` in the same slot. */
+  resourceType: string;
+  /** The Drupal node id the write targets. */
+  cmsResourceId: string;
+  /** A CAS anchor over the CURRENT remote content (read before capture). */
+  baseRemoteRevisionRef: string | null;
+  /** Idempotency key on `cms_snapshot_targets` (unique) — a re-drive of the same
+   * proposal reuses the same target row (the outbox-apply substrate). */
+  operationId: string;
+  title?: string;
+};
+
+/** The snapshot identity a capture returns — the review/verification pin. */
+export type CmsReviewCaptureResult = {
+  artifactId: string;
+  snapshotRevisionId: string;
+  snapshotTargetId: string;
+  operationId: string;
+  producedEventId: string | null;
+};
+
+/** Disposition of a captured staged write's external effect, disposition-aware
+ * (a plain held/not-held cannot tell approve from reject — both are "not held",
+ * but a rejected effect must NEVER be applied). Host binds it over
+ * `isArtifactEffectHeld` + the gate's terminal disposition:
+ *   - `held`     — the review gate is pending (or a repair is in flight); HOLD.
+ *   - `approved` — the gate resolved `approve`; the effect is released → APPLY.
+ *   - `rejected` — the gate resolved `reject`; the effect is tombstoned → REFUSE.
+ *   - `ungated`  — the org lattice permitted the effect without a gate → APPLY.
+ *   - `unknown`  — no capture / indeterminate → fail-closed REFUSE. */
+export type CmsReviewDisposition = "held" | "approved" | "rejected" | "ungated" | "unknown";
+
+/** The gate a captured staged write is holding on (for surfacing + the read-back
+ * binding). */
+export type CmsReviewGateRef = { gateId: string; runId: string } | null;
+
+/** Post-apply read-back input — the connector re-reads the applied Drupal node
+ * and hands the host the flat field map; the host re-projects it against the
+ * STORED scope manifest and calls `recordCmsApplyVerification`. */
+export type CmsReviewReadbackInput = {
+  operationId: string;
+  gateId: string;
+  runId: string;
+  /** The applied (post-apply) field values re-read from Drupal. */
+  postApplyFields: Record<string, string>;
+};
+
+export type CmsReviewReadbackResult = {
+  ok: boolean;
+  outcome?: "verified" | "drifted" | "unmet";
+  outOfScope?: string[];
+  code?: string;
+  error?: string;
+};
+
+/**
+ * The host-bound CMS content-review seam. OPTIONAL — unbound on a pre-S5 /
+ * standalone host, where the write path stays byte-identical (fence OFF).
+ */
+export type CmsReviewSeam = {
+  /** The host review-orchestration fence (`isLifecycleReviewOrchestrationActive()`,
+   * DEFAULT-OFF). False → the connector write path is byte-identical to pre-S7. */
+  isReviewActive: () => boolean;
+  /** Capture the proposed node content as a held, gate-able review target (one Tx:
+   * snapshot substrate + produced event + apply binding). Operation-idempotent on
+   * `operationId` (a re-drive returns the existing binding without re-minting). */
+  captureStagedWrite: (input: CmsReviewCaptureInput) => Promise<CmsReviewCaptureResult>;
+  /** The disposition of a captured staged write's external effect (see
+   * `CmsReviewDisposition`) — the connector's apply gate. */
+  resolveDisposition: (input: {
+    artifactId: string;
+    snapshotRevisionId: string;
+  }) => Promise<{ disposition: CmsReviewDisposition; gate: CmsReviewGateRef }>;
+  /** Record the post-apply read-back verification against the STORED scope
+   * manifest → `verified` / `drifted` / `unmet`. */
+  recordApplyVerification: (input: CmsReviewReadbackInput) => Promise<CmsReviewReadbackResult>;
+};
+
 export interface DrupalConnectorDeps {
   decodeCursor: (cursor?: string) => number;
   buildListPage: <T>(items: T[], total: number, offset: number, limit: number) => ListPage<T>;
@@ -338,6 +486,14 @@ export interface DrupalConnectorDeps {
   requireInstanceWriteAuthority: (
     input: RequireInstanceWriteAuthorityInput,
   ) => Promise<void>;
+  /**
+   * The S7 review-before-publish seam (see `CmsReviewSeam`). OPTIONAL: unbound on
+   * a pre-S5 host / standalone build, where the staged-write path stays
+   * byte-identical (fence OFF). `register.ts` always constructs it (its members
+   * resolve the `@cinatra-ai/host:cms-review` capability lazily), and
+   * `isReviewActive()` degrades to `false` when the host does not publish it.
+   */
+  cmsReview?: CmsReviewSeam;
 }
 
 const DRUPAL_DEPS_KEY = Symbol.for("@cinatra-ai/drupal-mcp-connector:host-deps/v1");

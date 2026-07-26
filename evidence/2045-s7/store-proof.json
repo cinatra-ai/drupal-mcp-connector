@@ -1,0 +1,622 @@
+{
+  "D1_held": {
+    "identity": {
+      "orgId": "1ff6ea3f-aebc-40b3-a85e-fe3bbe976c93",
+      "userId": "c1cac299-cb28-4dc4-a283-2b166c4b45bc",
+      "runId": "9457146b-a456-42a4-9152-05f1f5e03b65"
+    },
+    "decision": {
+      "status": "pending_review",
+      "applied": false,
+      "operationId": "41e4a2ef23465df4ceeb141032e93ed07f05a91734458d815f76ab12772ff4e0",
+      "snapshotArtifactId": "a3c518cc-fe8d-4a42-a4ab-e2ac9c50f47a",
+      "snapshotRevisionId": "a783ffa0-9c79-462c-93b8-f362cc8a476f",
+      "gate": null,
+      "nodeId": "3",
+      "resourceType": "article",
+      "reviewedPaths": [
+        "title"
+      ],
+      "url": "http://localhost:8592/node/3",
+      "message": "This content edit is staged for human review and has NOT been saved to Drupal. It will be applied only after a reviewer approves the change."
+    },
+    "drupalBefore": {
+      "title": "S7 hardened: second reviewed title",
+      "body": "<p>Original body paragraph v2.</p>[rewritten-on-save-by-site-module]",
+      "status": true,
+      "changed": 1785089091
+    },
+    "drupalAfter": {
+      "title": "S7 hardened: second reviewed title",
+      "body": "<p>Original body paragraph v2.</p>[rewritten-on-save-by-site-module]",
+      "status": true,
+      "changed": 1785089091
+    },
+    "sweep": {
+      "scanned": 1,
+      "gatesCreated": 1,
+      "noGate": 0,
+      "notClassifiable": 0,
+      "failed": 0,
+      "batchesCoalesced": 0
+    },
+    "store": {
+      "cms_snapshot_targets": [
+        {
+          "id": "e21d6a33-3372-401f-b83f-584a16817a9f",
+          "artifact_id": "a3c518cc-fe8d-4a42-a4ab-e2ac9c50f47a",
+          "snapshot_revision_id": "a783ffa0-9c79-462c-93b8-f362cc8a476f",
+          "connector_instance": "s72045-site",
+          "resource_type": "article",
+          "resource_id": "3",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "base_remote_revision_ref": "3c6bb5ae0ba80f4b1567643fdbf99827ac6969865cd75e33ee735309552db668",
+          "operation_id": "41e4a2ef23465df4ceeb141032e93ed07f05a91734458d815f76ab12772ff4e0"
+        }
+      ],
+      "objects": [
+        {
+          "id": "a3c518cc-fe8d-4a42-a4ab-e2ac9c50f47a",
+          "type": "@cinatra-ai/objects:cms-content-snapshot",
+          "run_id": "9457146b-a456-42a4-9152-05f1f5e03b65",
+          "org_id": "1ff6ea3f-aebc-40b3-a85e-fe3bbe976c93"
+        }
+      ],
+      "representation": [
+        {
+          "id": "a783ffa0-9c79-462c-93b8-f362cc8a476f",
+          "org_id": "1ff6ea3f-aebc-40b3-a85e-fe3bbe976c93",
+          "artifact_id": "a3c518cc-fe8d-4a42-a4ab-e2ac9c50f47a",
+          "revision": 1,
+          "form": "file"
+        }
+      ],
+      "artifact_produced_outbox": [
+        {
+          "event_id": "8c8a3ed46bbec1b3d42b29ea376ec86c42a6f39af7b1f33a86ea39d3030519c8",
+          "emitter": "object_cms_snapshot_capture",
+          "destination_class": "external_publish",
+          "status": "processed",
+          "producer_run_id": "9457146b-a456-42a4-9152-05f1f5e03b65",
+          "origin_kind": "user_provided",
+          "continuation_mode": "async_effects_gated"
+        }
+      ],
+      "artifact_review_gates": [
+        {
+          "id": "5f23bfd0-8828-4558-a41c-740848623b21",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "9d56b698-a556-4725-beed-075e47dfda08",
+              "representationRevisionId": "af70ca06-7485-4265-83ed-8767150c3391"
+            }
+          ],
+          "review_task_id": "lifecycle-review:73f03b2ef67d308f945668b68c75ff5c81f83356b1d225da8411d73927df1872"
+        },
+        {
+          "id": "5a0f52bd-89ce-442c-94e6-e229ada17e48",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "622c0fc4-5259-4b46-a2c8-869b438b7856",
+              "representationRevisionId": "a98704e0-f487-4f2b-9f93-04ae442c236e"
+            }
+          ],
+          "review_task_id": "lifecycle-review:ee67d81e5917804edd110ddddbb789359feeffa6f53eec2fb916b372d3556fae"
+        },
+        {
+          "id": "11405c57-242b-4d9e-ac47-d836fea2208c",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "622c0fc4-5259-4b46-a2c8-869b438b7856",
+              "representationRevisionId": "a98704e0-f487-4f2b-9f93-04ae442c236e:post-apply"
+            }
+          ],
+          "review_task_id": "lifecycle-review:verify:verify:5a0f52bd-89ce-442c-94e6-e229ada17e48"
+        },
+        {
+          "id": "c7af2b91-f6b2-4010-b2bf-10759fd012ae",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "e9cc5e8f-0e35-4247-be60-6cecab1ee1ab",
+              "representationRevisionId": "b86000a9-2f98-4794-9750-fa9f7a6454a6"
+            }
+          ],
+          "review_task_id": "lifecycle-review:5427ca0d2e176394d761f5fe2b078baa0d15b411a745f130280d4b2fa053de4d"
+        },
+        {
+          "id": "6a51366b-13a8-4f09-a793-4fca59b3a4f8",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "5d14e9f8-5936-4ed5-a0cb-2e9cc57fd9f2",
+              "representationRevisionId": "86d77f39-89cd-4dae-b9f2-0d74e73da770"
+            }
+          ],
+          "review_task_id": "lifecycle-review:572e0ab0d87ee1c31c0965ac7bf02e0ffaa79748d6ed61819732217a43da05d1"
+        },
+        {
+          "id": "14d69b09-5faa-47b1-b391-dac0acfedfd2",
+          "status": "pending",
+          "disposition": null,
+          "pinned_targets": [
+            {
+              "artifactId": "5d14e9f8-5936-4ed5-a0cb-2e9cc57fd9f2",
+              "representationRevisionId": "86d77f39-89cd-4dae-b9f2-0d74e73da770:post-apply"
+            }
+          ],
+          "review_task_id": "lifecycle-review:verify:verify:6a51366b-13a8-4f09-a793-4fca59b3a4f8"
+        },
+        {
+          "id": "58f3265b-85a0-4c0e-a7ab-9cb375be36f2",
+          "status": "pending",
+          "disposition": null,
+          "pinned_targets": [
+            {
+              "artifactId": "a3c518cc-fe8d-4a42-a4ab-e2ac9c50f47a",
+              "representationRevisionId": "a783ffa0-9c79-462c-93b8-f362cc8a476f"
+            }
+          ],
+          "review_task_id": "lifecycle-review:8c8a3ed46bbec1b3d42b29ea376ec86c42a6f39af7b1f33a86ea39d3030519c8"
+        }
+      ],
+      "artifact_verification_records": [
+        {
+          "id": "verify:5f23bfd0-8828-4558-a41c-740848623b21",
+          "outcome": "verified",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "field_diff": [],
+          "gate_id": "5f23bfd0-8828-4558-a41c-740848623b21"
+        },
+        {
+          "id": "verify:5a0f52bd-89ce-442c-94e6-e229ada17e48",
+          "outcome": "drifted",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "field_diff": [
+            {
+              "after": "<p>Original body paragraph.</p>[rewritten-on-save-by-site-module]",
+              "field": "body",
+              "before": "<p>Original body paragraph.</p>"
+            }
+          ],
+          "gate_id": "5a0f52bd-89ce-442c-94e6-e229ada17e48"
+        },
+        {
+          "id": "verify:c7af2b91-f6b2-4010-b2bf-10759fd012ae",
+          "outcome": "verified",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "field_diff": [],
+          "gate_id": "c7af2b91-f6b2-4010-b2bf-10759fd012ae"
+        },
+        {
+          "id": "verify:6a51366b-13a8-4f09-a793-4fca59b3a4f8",
+          "outcome": "drifted",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "field_diff": [
+            {
+              "after": "<p>Original body paragraph v2.</p>[rewritten-on-save-by-site-module]",
+              "field": "body",
+              "before": "<p>Original body paragraph v2.</p>"
+            }
+          ],
+          "gate_id": "6a51366b-13a8-4f09-a793-4fca59b3a4f8"
+        }
+      ]
+    }
+  },
+  "D3_verified": {
+    "result": {
+      "applied": {
+        "nid": 3,
+        "title": "S7 hardened: reviewed title",
+        "language": "en",
+        "fields_updated": [
+          "title"
+        ],
+        "paragraph_fields_updated": null,
+        "untouched_translatable_fields": null,
+        "revision_id": "6",
+        "message": "Content updated successfully in 'en' (the source language)."
+      },
+      "review": {
+        "operationId": "292dcf3a4459321a6d8aeb36cb952a26c58f32963f6023adcc797f7c5b7c24f6",
+        "ok": true,
+        "outcome": "verified",
+        "outOfScope": []
+      }
+    },
+    "drupalBefore": {
+      "title": "Drupal S7 fixture v2: original title",
+      "body": "<p>Original body paragraph v2.</p>",
+      "status": true,
+      "changed": 1785088961
+    },
+    "drupalAfter": {
+      "title": "S7 hardened: reviewed title",
+      "body": "<p>Original body paragraph v2.</p>",
+      "status": true,
+      "changed": 1785089059
+    },
+    "store": {
+      "cms_snapshot_targets": [
+        {
+          "id": "a1e6d652-e829-4d20-a029-5e1d421aad82",
+          "artifact_id": "e9cc5e8f-0e35-4247-be60-6cecab1ee1ab",
+          "snapshot_revision_id": "b86000a9-2f98-4794-9750-fa9f7a6454a6",
+          "connector_instance": "s72045-site",
+          "resource_type": "article",
+          "resource_id": "3",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "base_remote_revision_ref": "8715e7c095b9b10218147c4fa7f38bdf75a200d5aac5b2c1eeb612ee949a0b30",
+          "operation_id": "292dcf3a4459321a6d8aeb36cb952a26c58f32963f6023adcc797f7c5b7c24f6"
+        }
+      ],
+      "objects": [
+        {
+          "id": "e9cc5e8f-0e35-4247-be60-6cecab1ee1ab",
+          "type": "@cinatra-ai/objects:cms-content-snapshot",
+          "run_id": "9457146b-a456-42a4-9152-05f1f5e03b65",
+          "org_id": "1ff6ea3f-aebc-40b3-a85e-fe3bbe976c93"
+        }
+      ],
+      "representation": [
+        {
+          "id": "b86000a9-2f98-4794-9750-fa9f7a6454a6",
+          "org_id": "1ff6ea3f-aebc-40b3-a85e-fe3bbe976c93",
+          "artifact_id": "e9cc5e8f-0e35-4247-be60-6cecab1ee1ab",
+          "revision": 1,
+          "form": "file"
+        }
+      ],
+      "artifact_produced_outbox": [
+        {
+          "event_id": "5427ca0d2e176394d761f5fe2b078baa0d15b411a745f130280d4b2fa053de4d",
+          "emitter": "object_cms_snapshot_capture",
+          "destination_class": "external_publish",
+          "status": "processed",
+          "producer_run_id": "9457146b-a456-42a4-9152-05f1f5e03b65",
+          "origin_kind": "user_provided",
+          "continuation_mode": "async_effects_gated"
+        }
+      ],
+      "artifact_review_gates": [
+        {
+          "id": "5f23bfd0-8828-4558-a41c-740848623b21",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "9d56b698-a556-4725-beed-075e47dfda08",
+              "representationRevisionId": "af70ca06-7485-4265-83ed-8767150c3391"
+            }
+          ],
+          "review_task_id": "lifecycle-review:73f03b2ef67d308f945668b68c75ff5c81f83356b1d225da8411d73927df1872"
+        },
+        {
+          "id": "5a0f52bd-89ce-442c-94e6-e229ada17e48",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "622c0fc4-5259-4b46-a2c8-869b438b7856",
+              "representationRevisionId": "a98704e0-f487-4f2b-9f93-04ae442c236e"
+            }
+          ],
+          "review_task_id": "lifecycle-review:ee67d81e5917804edd110ddddbb789359feeffa6f53eec2fb916b372d3556fae"
+        },
+        {
+          "id": "11405c57-242b-4d9e-ac47-d836fea2208c",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "622c0fc4-5259-4b46-a2c8-869b438b7856",
+              "representationRevisionId": "a98704e0-f487-4f2b-9f93-04ae442c236e:post-apply"
+            }
+          ],
+          "review_task_id": "lifecycle-review:verify:verify:5a0f52bd-89ce-442c-94e6-e229ada17e48"
+        },
+        {
+          "id": "c7af2b91-f6b2-4010-b2bf-10759fd012ae",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "e9cc5e8f-0e35-4247-be60-6cecab1ee1ab",
+              "representationRevisionId": "b86000a9-2f98-4794-9750-fa9f7a6454a6"
+            }
+          ],
+          "review_task_id": "lifecycle-review:5427ca0d2e176394d761f5fe2b078baa0d15b411a745f130280d4b2fa053de4d"
+        }
+      ],
+      "artifact_verification_records": [
+        {
+          "id": "verify:5f23bfd0-8828-4558-a41c-740848623b21",
+          "outcome": "verified",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "field_diff": [],
+          "gate_id": "5f23bfd0-8828-4558-a41c-740848623b21"
+        },
+        {
+          "id": "verify:5a0f52bd-89ce-442c-94e6-e229ada17e48",
+          "outcome": "drifted",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "field_diff": [
+            {
+              "after": "<p>Original body paragraph.</p>[rewritten-on-save-by-site-module]",
+              "field": "body",
+              "before": "<p>Original body paragraph.</p>"
+            }
+          ],
+          "gate_id": "5a0f52bd-89ce-442c-94e6-e229ada17e48"
+        },
+        {
+          "id": "verify:c7af2b91-f6b2-4010-b2bf-10759fd012ae",
+          "outcome": "verified",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "field_diff": [],
+          "gate_id": "c7af2b91-f6b2-4010-b2bf-10759fd012ae"
+        }
+      ]
+    }
+  },
+  "D4_drifted": {
+    "result": {
+      "applied": {
+        "nid": 3,
+        "title": "S7 hardened: second reviewed title",
+        "language": "en",
+        "fields_updated": [
+          "title"
+        ],
+        "paragraph_fields_updated": null,
+        "untouched_translatable_fields": null,
+        "revision_id": "7",
+        "message": "Content updated successfully in 'en' (the source language)."
+      },
+      "review": {
+        "operationId": "6a22e07d7d992a5370f5c7d0c9c69f1e89f2ad63b7058861c9fd59a0e1395b06",
+        "ok": true,
+        "outcome": "drifted",
+        "outOfScope": [
+          "body"
+        ]
+      }
+    },
+    "drupalBefore": {
+      "title": "S7 hardened: reviewed title",
+      "body": "<p>Original body paragraph v2.</p>",
+      "status": true,
+      "changed": 1785089059
+    },
+    "drupalAfter": {
+      "title": "S7 hardened: second reviewed title",
+      "body": "<p>Original body paragraph v2.</p>[rewritten-on-save-by-site-module]",
+      "status": true,
+      "changed": 1785089091
+    },
+    "store": {
+      "cms_snapshot_targets": [
+        {
+          "id": "ae879bca-5463-49a3-842f-82e9ce288d34",
+          "artifact_id": "5d14e9f8-5936-4ed5-a0cb-2e9cc57fd9f2",
+          "snapshot_revision_id": "86d77f39-89cd-4dae-b9f2-0d74e73da770",
+          "connector_instance": "s72045-site",
+          "resource_type": "article",
+          "resource_id": "3",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "base_remote_revision_ref": "cc104cefc8f9722478c7c4876f1e6b76e91e2b8336446d6ffe2fffde2dd6eb9b",
+          "operation_id": "6a22e07d7d992a5370f5c7d0c9c69f1e89f2ad63b7058861c9fd59a0e1395b06"
+        }
+      ],
+      "objects": [
+        {
+          "id": "5d14e9f8-5936-4ed5-a0cb-2e9cc57fd9f2",
+          "type": "@cinatra-ai/objects:cms-content-snapshot",
+          "run_id": "9457146b-a456-42a4-9152-05f1f5e03b65",
+          "org_id": "1ff6ea3f-aebc-40b3-a85e-fe3bbe976c93"
+        }
+      ],
+      "representation": [
+        {
+          "id": "86d77f39-89cd-4dae-b9f2-0d74e73da770",
+          "org_id": "1ff6ea3f-aebc-40b3-a85e-fe3bbe976c93",
+          "artifact_id": "5d14e9f8-5936-4ed5-a0cb-2e9cc57fd9f2",
+          "revision": 1,
+          "form": "file"
+        }
+      ],
+      "artifact_produced_outbox": [
+        {
+          "event_id": "572e0ab0d87ee1c31c0965ac7bf02e0ffaa79748d6ed61819732217a43da05d1",
+          "emitter": "object_cms_snapshot_capture",
+          "destination_class": "external_publish",
+          "status": "processed",
+          "producer_run_id": "9457146b-a456-42a4-9152-05f1f5e03b65",
+          "origin_kind": "user_provided",
+          "continuation_mode": "async_effects_gated"
+        }
+      ],
+      "artifact_review_gates": [
+        {
+          "id": "5f23bfd0-8828-4558-a41c-740848623b21",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "9d56b698-a556-4725-beed-075e47dfda08",
+              "representationRevisionId": "af70ca06-7485-4265-83ed-8767150c3391"
+            }
+          ],
+          "review_task_id": "lifecycle-review:73f03b2ef67d308f945668b68c75ff5c81f83356b1d225da8411d73927df1872"
+        },
+        {
+          "id": "5a0f52bd-89ce-442c-94e6-e229ada17e48",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "622c0fc4-5259-4b46-a2c8-869b438b7856",
+              "representationRevisionId": "a98704e0-f487-4f2b-9f93-04ae442c236e"
+            }
+          ],
+          "review_task_id": "lifecycle-review:ee67d81e5917804edd110ddddbb789359feeffa6f53eec2fb916b372d3556fae"
+        },
+        {
+          "id": "11405c57-242b-4d9e-ac47-d836fea2208c",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "622c0fc4-5259-4b46-a2c8-869b438b7856",
+              "representationRevisionId": "a98704e0-f487-4f2b-9f93-04ae442c236e:post-apply"
+            }
+          ],
+          "review_task_id": "lifecycle-review:verify:verify:5a0f52bd-89ce-442c-94e6-e229ada17e48"
+        },
+        {
+          "id": "c7af2b91-f6b2-4010-b2bf-10759fd012ae",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "e9cc5e8f-0e35-4247-be60-6cecab1ee1ab",
+              "representationRevisionId": "b86000a9-2f98-4794-9750-fa9f7a6454a6"
+            }
+          ],
+          "review_task_id": "lifecycle-review:5427ca0d2e176394d761f5fe2b078baa0d15b411a745f130280d4b2fa053de4d"
+        },
+        {
+          "id": "6a51366b-13a8-4f09-a793-4fca59b3a4f8",
+          "status": "resolved",
+          "disposition": "approve",
+          "pinned_targets": [
+            {
+              "artifactId": "5d14e9f8-5936-4ed5-a0cb-2e9cc57fd9f2",
+              "representationRevisionId": "86d77f39-89cd-4dae-b9f2-0d74e73da770"
+            }
+          ],
+          "review_task_id": "lifecycle-review:572e0ab0d87ee1c31c0965ac7bf02e0ffaa79748d6ed61819732217a43da05d1"
+        },
+        {
+          "id": "14d69b09-5faa-47b1-b391-dac0acfedfd2",
+          "status": "pending",
+          "disposition": null,
+          "pinned_targets": [
+            {
+              "artifactId": "5d14e9f8-5936-4ed5-a0cb-2e9cc57fd9f2",
+              "representationRevisionId": "86d77f39-89cd-4dae-b9f2-0d74e73da770:post-apply"
+            }
+          ],
+          "review_task_id": "lifecycle-review:verify:verify:6a51366b-13a8-4f09-a793-4fca59b3a4f8"
+        }
+      ],
+      "artifact_verification_records": [
+        {
+          "id": "verify:5f23bfd0-8828-4558-a41c-740848623b21",
+          "outcome": "verified",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "field_diff": [],
+          "gate_id": "5f23bfd0-8828-4558-a41c-740848623b21"
+        },
+        {
+          "id": "verify:5a0f52bd-89ce-442c-94e6-e229ada17e48",
+          "outcome": "drifted",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "field_diff": [
+            {
+              "after": "<p>Original body paragraph.</p>[rewritten-on-save-by-site-module]",
+              "field": "body",
+              "before": "<p>Original body paragraph.</p>"
+            }
+          ],
+          "gate_id": "5a0f52bd-89ce-442c-94e6-e229ada17e48"
+        },
+        {
+          "id": "verify:c7af2b91-f6b2-4010-b2bf-10759fd012ae",
+          "outcome": "verified",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "field_diff": [],
+          "gate_id": "c7af2b91-f6b2-4010-b2bf-10759fd012ae"
+        },
+        {
+          "id": "verify:6a51366b-13a8-4f09-a793-4fca59b3a4f8",
+          "outcome": "drifted",
+          "scope_manifest": {
+            "paths": [
+              "title"
+            ]
+          },
+          "field_diff": [
+            {
+              "after": "<p>Original body paragraph v2.</p>[rewritten-on-save-by-site-module]",
+              "field": "body",
+              "before": "<p>Original body paragraph v2.</p>"
+            }
+          ],
+          "gate_id": "6a51366b-13a8-4f09-a793-4fca59b3a4f8"
+        }
+      ]
+    }
+  }
+}
