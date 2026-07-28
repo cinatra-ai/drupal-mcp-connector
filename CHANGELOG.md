@@ -3,6 +3,10 @@
 All notable changes to this project are documented here, derived from the
 project's merged pull request and release-tag history.
 
+## Unreleased
+
+- refactor(skills): the widget-chat bundle leaves this connector. `skills/drupal-widget-chat/SKILL.md` and the now-purposeless `cinatra/plugin.json` skills pointer are deleted, `skills` drops out of the published `files` list, and the `cinatra.capabilities` declaration of `widget-chat.drupal-content-editor` moves to the package that actually ships the bundle. In its place the manifest declares a required runtime dependency edge on `@cinatra-ai/drupal-widget-chat-skill` (the renamed `@cinatra-ai/drupal-skills`), which has always carried a byte-identical copy of the same prompt — so this change collapses a duplicate rather than relocating a unique file. `cinatra.widgetStream.skillCapability` is unchanged: the connector still NAMES the capability its widget needs, and the skill package now solely PROVIDES it. Required by the packaging contract that bans a skill bundle inside a non-skill extension (cinatra-ai/cinatra#2089, migrated by cinatra-ai/cinatra#2090).
+
 ## v0.1.6 — 2026-07-07
 
 Required rider alongside Cinatra 0.1.7: this release takes ownership of Drupal-specific capability code that Cinatra 0.1.7 removes from core, and adds the Drupal publish-notification receiver.

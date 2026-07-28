@@ -1,9 +1,0 @@
-{
-  "id": "@cinatra-ai/drupal-mcp-connector",
-  "name": "Drupal Connector",
-  "description": "Cinatra Drupal CMS connector — content-editor tooling and widget auth.",
-  "skills": {
-    "type": "system",
-    "path": "../skills"
-  }
-}

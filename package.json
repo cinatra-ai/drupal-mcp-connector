@@ -5,7 +5,6 @@
   "files": [
     "src",
     "cinatra",
-    "skills",
     "!src/__tests__/"
   ],
   "type": "module",
@@ -68,10 +67,18 @@
       "nango",
       "capabilities"
     ],
-    "dependencies": [],
-    "capabilities": {
-      "widget-chat.drupal-content-editor": "drupal-widget-chat"
-    },
+    "dependencies": [
+      {
+        "packageName": "@cinatra-ai/drupal-widget-chat-skill",
+        "edgeType": "runtime",
+        "versionConstraint": {
+          "kind": "semver-range",
+          "range": "*"
+        },
+        "requirement": "required",
+        "kind": "skill"
+      }
+    ],
     "webhooks": {
       "hooks": [
         {

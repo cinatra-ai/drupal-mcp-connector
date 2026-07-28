@@ -137,4 +137,4 @@ The same threat class on the WordPress side is closed by:
 - Security: `instanceId` and `nodeId` are **forcibly overridden** from the server-trusted request context inside `execute()` — any LLM-supplied identity values are dropped. The tool schema only exposes `instructions`.
 - Calls `drupal_content_editor_run` in-process (not via MCP network round-trip).
 
-The widget-chat skill was relocated to the `@cinatra-ai/drupal-skills` skill extension at `extensions/cinatra-ai/drupal-skills/skills/drupal-widget-chat/SKILL.md` with catalog id `@cinatra-ai/drupal-skills:drupal-widget-chat`.
+The widget-chat skill lives in the `@cinatra-ai/drupal-widget-chat-skill` extension at `extensions/cinatra-ai/drupal-widget-chat-skill/skills/drupal-widget-chat/SKILL.md` with catalog id `@cinatra-ai/drupal-widget-chat-skill:drupal-widget-chat`. This connector reaches it through the declared runtime dependency edge in `package.json`; it ships no bundle of its own, and `cinatra.widgetStream.skillCapability` names the `widget-chat.drupal-content-editor` capability that the skill package provides.
