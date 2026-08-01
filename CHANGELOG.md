@@ -5,21 +5,21 @@ project's merged pull request and release-tag history.
 
 ## Unreleased
 
-- refactor(skills): the widget-chat bundle leaves this connector. `skills/drupal-widget-chat/SKILL.md` and the now-purposeless `cinatra/plugin.json` skills pointer are deleted, `skills` drops out of the published `files` list, and the `cinatra.capabilities` declaration of `widget-chat.drupal-content-editor` moves to the package that actually ships the bundle. In its place the manifest declares a required runtime dependency edge on `@cinatra-ai/drupal-widget-chat-skill` (the renamed `@cinatra-ai/drupal-skills`), which has always carried a byte-identical copy of the same prompt — so this change collapses a duplicate rather than relocating a unique file. `cinatra.widgetStream.skillCapability` is unchanged: the connector still NAMES the capability its widget needs, and the skill package now solely PROVIDES it. Required by the packaging contract that bans a skill bundle inside a non-skill extension (cinatra-ai/cinatra#2089, migrated by cinatra-ai/cinatra#2090).
+- refactor(skills): the widget-chat bundle leaves this connector. `skills/drupal-widget-chat/SKILL.md` and the now-purposeless `cinatra/plugin.json` skills pointer are deleted, `skills` drops out of the published `files` list, and the `cinatra.capabilities` declaration of `widget-chat.drupal-content-editor` moves to the package that actually ships the bundle. In its place the manifest declares a required runtime dependency edge on `@cinatra-ai/drupal-widget-chat-skill` (the renamed `@cinatra-ai/drupal-skills`), which has always carried a byte-identical copy of the same prompt — so this change collapses a duplicate rather than relocating a unique file. `cinatra.widgetStream.skillCapability` is unchanged: the connector still NAMES the capability its widget needs, and the skill package now solely PROVIDES it. Required by the packaging contract that bans a skill bundle inside a non-skill extension.
 
 ## v0.1.6 — 2026-07-07
 
 Required rider alongside Cinatra 0.1.7: this release takes ownership of Drupal-specific capability code that Cinatra 0.1.7 removes from core, and adds the Drupal publish-notification receiver.
 
-- feat(widget-auth): own the Drupal widget-auth store and register the capability — on a Cinatra 0.1.7 host, widget sessions on connected sites need this version (cinatra#975 W2) (#58)
+- feat(widget-auth): own the Drupal widget-auth store and register the capability — on a Cinatra 0.1.7 host, widget sessions on connected sites need this version (#58)
 - feat(webhooks): `cinatra.webhooks` declaration and handler for the Drupal node-published event on the host's generic webhook route, with per-binding secret verification host-side; pairs with Drupal module 0.1.6 (#54)
 - feat: bundle the Drupal widget-chat skill in the install closure so fresh installs no longer boot with an unresolved widget-chat capability, and align the content-editor dispatch payload to the WordPress object shape (#56)
-- feat(instances): own the relocated Drupal instance-settings client, registered under its host capability (cinatra#975 W3) (#59)
-- feat(dev-setup): dev-mode provisioning moves into a connector-owned `devSetup` hook (cinatra#976) (#55); the dev fixture probe runs in-container, dropping the `node:fs` host precheck (#57)
+- feat(instances): own the relocated Drupal instance-settings client, registered under its host capability (#59)
+- feat(dev-setup): dev-mode provisioning moves into a connector-owned `devSetup` hook (#55); the dev fixture probe runs in-container, dropping the `node:fs` host precheck (#57)
 
 ## v0.1.5 — 2026-07-04
 
-- feat: final connection access-scoping declaration — default scope "workspace" (cinatra#954 W4) (#53)
+- feat: final connection access-scoping declaration — default scope "workspace" (#53)
 - feat(mcp): declare the mcp.json primitive surface for the Drupal MCP tools (#51)
 - fix(security): redact the Nango credential binding from `drupal_instances_list` (#50)
 - chore(deps): declare `cinatra.consumes` for closure-gate enrollment (#49)
