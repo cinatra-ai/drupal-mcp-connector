@@ -1,3 +1,8 @@
+// `zod` is a DECLARED dependency of this package, at `^4.4.3`; see
+// `../mcp/registry` for the reasoning behind both the declaration and that
+// specific range (#83). This handler validates a webhook payload rather than
+// publishing a schema over MCP, so the range's lower bound is not load-bearing
+// here — it is load-bearing one module over, and the range is package-wide.
 import { z } from "zod";
 
 // Inbound `node-published` webhook handler (cinatra#974, reworking PR #969's

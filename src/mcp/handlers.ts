@@ -1,3 +1,7 @@
+// `zod` is a DECLARED dependency of this package, at `^4.4.3` — a range whose
+// lower bound is a hard requirement of the MCP server that converts these
+// schemas, not a style choice. The schemas defined below cross the host boundary
+// via `./registry`, which carries the full reasoning (#83).
 import { z } from "zod";
 import type { ExtensionPrimitiveRequest } from "@cinatra-ai/sdk-extensions";
 
