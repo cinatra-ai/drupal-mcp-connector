@@ -7,6 +7,14 @@
 // error envelopes. They also cover missing-credential errors, happy-path
 // headers from the deps seam instead of the row, and preventing token leakage
 // in error messages.
+//
+// cinatra#2218 L2e: the mocked package moved from the v1 `@modelcontextprotocol/sdk`
+// deep-import paths (`/client/index.js` + `/client/streamableHttp.js`) to the
+// single `@modelcontextprotocol/client` v2 entry point. EVERY behavioural
+// assertion below is unchanged from the pre-migration file — that is the point:
+// this file is the behaviour-parity lock for the package swap. The two NEW
+// assertions are the negotiation-option ones at the end, which pin the thing a
+// package swap alone does NOT deliver.
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
@@ -18,19 +26,16 @@ const mockConnect = vi.fn();
 const mockCallTool = vi.fn();
 const mockClose = vi.fn();
 
-vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
+vi.mock("@modelcontextprotocol/client", () => ({
   // Regular function required — arrow functions cannot be used with `new`.
   Client: vi.fn().mockImplementation(function () {
     return { connect: mockConnect, callTool: mockCallTool, close: mockClose };
   }),
-}));
-
-vi.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
   StreamableHTTPClientTransport: vi.fn().mockImplementation(function () { return {}; }),
 }));
 
-import { callDrupalMcp } from "../lib/drupal-mcp-client";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { callDrupalMcp, DRUPAL_MCP_VERSION_NEGOTIATION } from "../lib/drupal-mcp-client";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
 // The host-bound Nango bearer-header builder (deps.buildNangoBearerHeader).
 const buildNangoBearerHeader = vi.fn();
@@ -51,6 +56,7 @@ describe("callDrupalMcp", () => {
     mockCallTool.mockReset();
     mockClose.mockReset().mockResolvedValue(undefined);
     vi.mocked(StreamableHTTPClientTransport).mockClear();
+    vi.mocked(Client).mockClear();
     buildNangoBearerHeader.mockReset();
     // Default Nango success — individual tests override for credential-specific cases.
     buildNangoBearerHeader.mockResolvedValue({
@@ -187,5 +193,58 @@ describe("callDrupalMcp", () => {
     });
     const result = await callDrupalMcp(inst(), "mcp_tools_get_recent_content", {});
     expect(result).toEqual({ id: "5" });
+  });
+
+  // A malformed peer that answers with a non-array `content` must still produce
+  // THIS module's "unexpected response format" error, not a TypeError from
+  // `.find()`. client@2.0.0 declares `content` as an array, so the runtime
+  // `Array.isArray` guard is the only thing standing between a malformed result
+  // and a crash — pinned here so a later "the type says it's an array" cleanup
+  // cannot silently remove it.
+  it("throws the unexpected-response-format error when content is not an array", async () => {
+    mockCallTool.mockResolvedValue({ content: "not-an-array" });
+    await expect(
+      callDrupalMcp(inst(), "mcp_tools_search_content", { query: "x" }),
+    ).rejects.toThrow(/unexpected response format \(no text content\)/);
+  });
+
+  // -------------------------------------------------------------------------
+  // NEGOTIATION OPTION — the part a package swap does not deliver.
+  //
+  // `versionNegotiation` is an OPTIONS OBJECT whose `mode` defaults to
+  // `'legacy'`. Written as a bare string the client reads `options?.mode` as
+  // undefined and silently connects on the 2025 era — a working client that
+  // never negotiated. These two assertions pin the constructor argument; the
+  // companion `drupal-mcp-client-negotiation.test.ts` proves the resulting era
+  // on the wire against real peers, which is the assertion that actually
+  // establishes the revision.
+  // -------------------------------------------------------------------------
+  it("passes versionNegotiation to the Client as an OBJECT with mode 'auto', never a bare string", async () => {
+    mockCallTool.mockResolvedValue({ content: [{ type: "text", text: "{}" }] });
+    await callDrupalMcp(inst(), "mcp_tools_search_content", { query: "x" });
+
+    expect(Client).toHaveBeenCalledTimes(1);
+    const [info, options] = vi.mocked(Client).mock.calls[0] as [
+      unknown,
+      { versionNegotiation?: unknown } | undefined,
+    ];
+    expect(info).toEqual({ name: "cinatra-connector-drupal", version: "1.0.0" });
+
+    const negotiation = options?.versionNegotiation;
+    expect(typeof negotiation).toBe("object");
+    expect(typeof negotiation).not.toBe("string");
+    expect(negotiation).toEqual({ mode: "auto" });
+  });
+
+  it("exports the negotiation constant it actually passes (one source of truth, no drift)", async () => {
+    mockCallTool.mockResolvedValue({ content: [{ type: "text", text: "{}" }] });
+    await callDrupalMcp(inst(), "mcp_tools_search_content", { query: "x" });
+
+    const [, options] = vi.mocked(Client).mock.calls[0] as [
+      unknown,
+      { versionNegotiation?: unknown } | undefined,
+    ];
+    expect(options?.versionNegotiation).toBe(DRUPAL_MCP_VERSION_NEGOTIATION);
+    expect(DRUPAL_MCP_VERSION_NEGOTIATION).toEqual({ mode: "auto" });
   });
 });
