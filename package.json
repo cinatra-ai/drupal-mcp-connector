@@ -63,6 +63,7 @@
       "name": "Cinatra"
     },
     "displayName": "Drupal MCP",
+    "logo": "./cinatra/logo.svg",
     "providesExternalMcpToolbox": true,
     "serverEntry": "./register",
     "devSetup": "./src/dev-setup",
