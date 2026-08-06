@@ -67,22 +67,49 @@ There is no credential field in the instance row to strip — `drupal_instances_
 
 ## MCP transport
 
-`callDrupalMcp` in `src/lib/drupal-mcp-client.ts` uses the `@modelcontextprotocol/sdk` `Client` + `StreamableHTTPClientTransport`. A new connection is opened and closed per call (no persistent session). The endpoint is `<siteUrl>/_mcp_tools`.
+`callDrupalMcp` in `src/lib/drupal-mcp-client.ts` uses the `@modelcontextprotocol/client` `Client` + `StreamableHTTPClientTransport`. The package is exact-pinned `2.0.0` in this repo's own `dependencies`; the v1 `@modelcontextprotocol/sdk` is gone from this package and is not a route to MCP revision `2026-07-28` at all. A new connection is opened and closed per call (no persistent session). The endpoint is `<siteUrl>/_mcp_tools`.
 
-Do not replace this with hand-rolled `fetch` + JSON-RPC body — the SDK manages session IDs, protocol version negotiation, and transport framing.
+Protocol-revision negotiation is EXPLICIT, not implicit: the client is constructed with `versionNegotiation: DRUPAL_MCP_VERSION_NEGOTIATION`, a typed `VersionNegotiationOptions` constant holding `{ mode: "auto" }`. It is typed rather than an inline literal on purpose — the option is read as `options?.mode ?? "legacy"`, so a bare `versionNegotiation: "auto"` string silently lands on the legacy era with nothing reporting it; the constant's type makes that a compile error at the call site. Do not weaken it to a fixed `{ mode: "legacy" }`: Drupal peers are per-instance sites their owners upgrade, so the era has to be settled per peer rather than once in this source.
+
+Do not replace this with hand-rolled `fetch` + JSON-RPC body — the library manages session IDs (assigned by the peer on the legacy leg, stored and replayed by the transport), the revision handshake, and transport framing.
+
+## Third-party dependencies must be declared here, and `zod` has a range rule
+
+Every third-party package this repo imports belongs in its own `package.json`. Host-internal `@cinatra-ai/*` packages are the ONE exception — those stay optional `peerDependencies`, because they live only in the cinatra monorepo and CI fails the repo if one leaks into `dependencies`. Anything else that resolves "for free" is resolving through the host's hoisted root `node_modules` symlink, which pnpm publishes only for a direct dependency of the ROOT importer: a phantom edge that breaks the moment the host drops its own line.
+
+That rule is not yet fully satisfied here, and the gap is worth knowing before you add an import. `@modelcontextprotocol/client` and `zod` are declared. Still undeclared and still resolving through the host: `server-only` (`src/lib/drupal-mcp-client.ts`, `src/mcp/toolbox.ts`, `src/settings-page.tsx`), `lucide-react` and a type-only `next` import (`src/settings-page.tsx`), and `vitest` (every test file). Each needs its own range decision rather than a blanket sweep, so do not assume an import resolving today means it is declared — check.
+
+`zod` carries an extra rule on top of being declared. The declared range is `^4.4.3`, and both bounds matter for different reasons:
+
+- **Never widen the lower bound — there are two floors and they differ.** Measured across zod 3.25.76 / 4.0.0 / 4.1.12 / 4.2.0 / 4.4.3, against a real `@modelcontextprotocol/server@2.0.0` and a real `tsc`:
+
+  | zod | `registerTool` typechecks | `tools/list` at runtime |
+  |---|---|---|
+  | 3.25.76 | no | **fails the whole list, JSON-RPC `-32603`** |
+  | 4.0.0 / 4.1.12 | **no** — TS2322 vs `ExtensionStandardSchema` | OK |
+  | 4.2.0 and up | yes | OK |
+
+  The **runtime** floor is major 4: a zod 3.x schema registers *cleanly* and then takes down **every** Drupal tool at once the first time a client lists them, and nothing at the registration call site can catch it. The **type** floor is 4.2, where zod first exposes `~standard.jsonSchema` — the property the host's `ExtensionStandardSchema` requires. The host tree really does carry a zod 3.x copy alongside the 4.x one, so the bad state is reachable. `src/__tests__/zod-declaration-contract.test.ts` locks the runtime half against a real MCP server.
+- **Do not exact-pin it — a convention, not a correctness cliff.** `^4.4.3` is the cinatra host's own range, character for character, and what all fifteen sibling extensions declaring `zod` use. The host reads these schemas structurally through `~standard`, never via `instanceof`, so a second compatible zod 4.x instance would still work — this is not a single-realm requirement, and pnpm would not guarantee one anyway (a filtered update can move the root importer alone). What matching the host buys is that a full resolution lands both on one instance rather than installing a second copy, and that a host bump inside major 4 carries this package along. `@modelcontextprotocol/client` next door IS exact-pinned, and that is not an inconsistency: it is connector-private and no other importer has an opinion about its version.
+
+A host move to a zod major past 4 has to reconcile this line.
 
 ## Tests
 
-Tests live in `src/__tests__/` (currently `drupal-mcp-client.test.ts`, `handlers.test.ts`, `content-editor-run.test.ts`, and `widget-chat-tool.test.ts`) and use a `vitest.config.ts` at the package root with these aliases:
+Tests live in `src/__tests__/` and use the `vitest.config.ts` at the package root. That config resolves its aliases against `../../..` — the cinatra monorepo root — so the suite runs only in a host-shaped tree, never in a standalone clone of this repo. This repo's own CI knows that and skips install/typecheck/test for source mirrors; the monorepo runs them.
 
-- `@/` → repo root `src/`
-- `@cinatra-ai/a2a` → `tests/__stubs__/cinatra-a2a.ts` (avoids Drizzle/DB deps)
-- `@cinatra-ai/drupal-connector/mcp-handlers` → `src/mcp/handlers.ts`
+Aliases:
 
-Run from the package directory:
+- `server-only` → monorepo `tests/__stubs__/server-only.ts`
+- `@cinatra-ai/a2a` → monorepo `tests/__stubs__/cinatra-a2a.ts` (avoids Drizzle/DB deps)
+- `@cinatra-ai/drupal-mcp-connector/mcp-handlers` → `src/mcp/handlers.ts`
+- `@cinatra-ai/drupal-mcp-connector/widget-chat-tool` → `src/widget-chat-tool.ts`
+- `@/` → monorepo `src/`
+
+Run from this package's directory inside the monorepo:
 
 ```bash
-cd packages/connector-drupal && pnpm vitest run --no-coverage
+cd extensions/cinatra-ai/drupal-mcp-connector && pnpm vitest run --no-coverage
 ```
 
 Avoid hard-coding a per-file or total test count here because it drifts as tests change. The E2E-05 named contract test in `handlers.test.ts` locks the `drupalUrl` fallback (`DRUPAL_CONTENT_EDITOR_A2A_URL` unset → `http://localhost:3020`).

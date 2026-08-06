@@ -1,6 +1,65 @@
 import { z } from "zod";
 import type { ExtensionMcpToolServer, ExtensionMcpToolResult } from "@cinatra-ai/sdk-extensions";
 
+// ---------------------------------------------------------------------------
+// WHY `zod` IS DECLARED, AND WHY AT THIS EXACT RANGE (#83).
+//
+// `zod` used to be imported here (and in `./handlers`, and in
+// `../webhooks/node-published`) without being declared anywhere — the same
+// phantom-dependency class `@modelcontextprotocol/client` was in before
+// cinatra#2218 L2e: resolved purely through the consuming host's hoisted root
+// `node_modules` symlink, which pnpm's isolated linker publishes only for a
+// direct dependency of the ROOT importer. It is now declared in this package's
+// own `dependencies`, at `^4.4.3` — the cinatra host's OWN range, character for
+// character. Neither half of that is cosmetic.
+//
+// TWO REAL FLOORS, so not a wider range. The schemas below LEAVE this package:
+// `registerTool` hands them across the host boundary and the host publishes
+// their argument shape on `tools/list`. Both bounds below are measured, against
+// a real `@modelcontextprotocol/server` 2.0.0 and a real `tsc`, across zod
+// 3.25.76 / 4.0.0 / 4.1.12 / 4.2.0 / 4.4.3 — not inferred from release notes:
+//
+//   RUNTIME floor is major 4. A zod 3.x schema does NOT fail locally and does
+//   NOT merely lose its own argument shape: it registers CLEANLY — so no
+//   try/catch at the call site can see it — and then fails the ENTIRE
+//   `tools/list` with JSON-RPC -32603, "Schema appears to be from zod 3, which
+//   the SDK cannot convert to JSON Schema." One unconvertible schema takes down
+//   every Drupal tool at once, the first time a client lists them. Every 4.x
+//   tested converts fine, including 4.0 and 4.1 — the SDK has a zod-4 path that
+//   does not go through Standard Schema at all.
+//
+//   TYPE floor is 4.2. The host's `ExtensionStandardSchema` requires
+//   `~standard.jsonSchema`, which zod first exposes in 4.2.0. On 4.0/4.1 the
+//   `registerTool` call below stops compiling (TS2322, `ZodType` not assignable
+//   to `ExtensionStandardSchema`) even though it would have run.
+//
+// So 3.x is a reachable outage rather than an old-but-workable option — and the
+// host tree really does carry a 3.x copy alongside the 4.x one, pulled
+// transitively by an unrelated dependency. `^4.4.3` clears both floors with
+// room; anything looser has to clear both deliberately.
+//
+// TRACKING THE HOST, so not an exact pin — a convention, NOT a correctness
+// cliff, and worth being accurate about. The host reads these schemas
+// structurally through `~standard`, never through `instanceof`, so a second
+// compatible zod 4.x instance in the tree would still work; this is not a
+// single-realm requirement, and pnpm would not guarantee one anyway (a filtered
+// update can move the root importer alone, leaving matching ranges resolved
+// apart). What carrying the host's range verbatim actually buys is that a full
+// resolution typically converges the connector and the host on ONE instance
+// rather than installing a second copy — measured on this change: both resolve
+// to the same store path — and that a host bump inside major 4 carries this
+// package along instead of stranding it a version behind. It is also what all fifteen
+// sibling extensions declaring `zod` do. `@modelcontextprotocol/client` one
+// directory over IS exact-pinned, and that is not an inconsistency: it is
+// connector-private, nothing built from it crosses back to the host, and no
+// other importer has an opinion about its version.
+//
+// The residual coordination point, stated rather than left implicit: a host move
+// to a zod MAJOR past 4 has to reconcile this line. That is now VISIBLE — the
+// edge appears in the host's lockfile — where the undeclared import made the
+// same coupling invisible.
+// ---------------------------------------------------------------------------
+
 import {
   createDrupalPrimitiveHandlers,
   nodeGetSchema,
