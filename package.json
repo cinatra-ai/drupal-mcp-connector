@@ -27,6 +27,7 @@
     "lint": "eslint . --no-inline-config"
   },
   "dependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "radix-ui": "^1.4.3",
@@ -47,6 +48,7 @@
     }
   },
   "devDependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
     "@typescript-eslint/parser": "8.65.0",
     "eslint": "10.8.0",
     "typescript": "5.9.3"
