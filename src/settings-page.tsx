@@ -1,5 +1,9 @@
 import "server-only";
 
+// `next` is a required peerDependency (#86), not merely a type source: only
+// `Metadata` below is type-only — `revalidatePath` and `Link` execute at
+// runtime, inside the HOST's own Next.js tree (this connector carries no
+// separately-bundled Next.js runtime of its own).
 import type { Metadata } from "next";
 import { revalidatePath } from "next/cache";
 

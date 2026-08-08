@@ -30,11 +30,14 @@
     "@modelcontextprotocol/client": "2.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "lucide-react": "^1.20.0",
     "radix-ui": "^1.4.3",
+    "server-only": "^0.0.1",
     "tailwind-merge": "^3.5.0",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
+    "next": "^16.2.9",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "@cinatra-ai/sdk-extensions": "*",
@@ -52,7 +55,8 @@
     "@modelcontextprotocol/server": "2.0.0",
     "@typescript-eslint/parser": "8.65.0",
     "eslint": "10.8.0",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "^4.1.10"
   },
   "cinatra": {
     "apiVersion": "cinatra.ai/v1",
