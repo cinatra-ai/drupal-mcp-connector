@@ -36,9 +36,9 @@ const manifest = JSON.parse(
 
 describe("server-only is declared in dependencies (#86)", () => {
   it("declares server-only in dependencies — not devDependencies, not undeclared", () => {
-    // Imported for its side effect in three production files, two of which
-    // ship in the published `files` payload (`src/mcp/toolbox.ts`,
-    // `src/settings-page.tsx`) alongside the third (`src/lib/drupal-mcp-client.ts`).
+    // Imported for its side effect in three production files, all three of
+    // which ship in the published `files` payload (`src/lib/drupal-mcp-client.ts`,
+    // `src/mcp/toolbox.ts`, `src/settings-page.tsx` — confirmed via `npm pack --dry-run`).
     expect(manifest.dependencies?.["server-only"]).toBeDefined();
     expect(manifest.devDependencies?.["server-only"]).toBeUndefined();
   });
