@@ -28,3 +28,15 @@ yarn.lock
 
 # Internal planning notes (local only)
 .planning/
+
+# Development state never lives in the repo (owner ruling 2026-08-28) — it belongs under the org-level .claude folder.
+evidence/
+pr-evidence/
+.planning/
+.claude/
+data/
+test-results/
+.pytest_cache/
+.env.local
+.env.*.local
+/vitest.integration-*.config.ts
