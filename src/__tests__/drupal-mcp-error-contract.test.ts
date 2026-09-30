@@ -6,14 +6,13 @@
 // `ProtocolError` (v2, no prefixes). That is only safe because the consumers do
 // not discriminate on either.
 //
-// WHAT THIS FILE ESTABLISHES, and what it does not. It drives the two DECISIONS
-// that a class change could have flipped — the fail-CLOSED content-write gate
-// and the fail-SOFT read fallback — with rejections of both shapes, and shows
-// the decision is identical. It does NOT prove "no consumer anywhere
-// discriminates": that is an audit result, recorded with its search in
-// `../lib/drupal-mcp-client.ts`, and the audit is what selected these two as
-// the decisions worth locking. The remaining in-package consumer is one
-// `console.warn` in `mcp/toolbox.ts` that reads `err.message`.
+// WHAT THIS FILE ESTABLISHES, and what it does not. It drives the DECISION
+// that a class change could have flipped — the fail-SOFT read fallback — with
+// rejections of both shapes, and shows the decision is identical. It does NOT
+// prove "no consumer anywhere discriminates": that is an audit result, recorded
+// with its search in `../lib/drupal-mcp-client.ts`, and the audit is what
+// selected this decision as the one worth locking. The remaining in-package
+// consumer is one `console.warn` in `mcp/toolbox.ts` that reads `err.message`.
 //
 // The v2 fixtures below are not guesses. The class, code and message shape of
 // each was MEASURED on the wire in `drupal-mcp-client-negotiation.test.ts`
@@ -21,14 +20,12 @@
 // failures through the real library; these constructors reproduce exactly what
 // it observed.
 //
-// Why this file exists at all rather than trusting the audit: one of these
-// consumers is a CONTENT-WRITE GATE. `evaluateStagedNodeWrite` refuses a
-// review-gated Drupal write when the full-field MCP read is unavailable —
-// fail-CLOSED. If an error class the gate could not recognise had ever been
-// allowed to read as "no error", the write would reach Drupal with no captured
-// review target. The sibling marketplace surface had exactly that defect shape
-// (cinatra#2218 L2b: a class-keyed gate that would have failed OPEN), so the
-// direction is asserted here rather than assumed.
+// Why this file exists at all rather than trusting the audit: the read fallback
+// is a decision keyed on a `callDrupalMcp` rejection. It must catch a rejection
+// of either class and fall back to the recent-content summary; had a rejection
+// of the new class escaped the fallback instead, a transient full-field read
+// failure would surface as a hard read failure, so the direction is asserted
+// here rather than assumed.
 //
 // The v2 error objects are constructed from the REAL package, not hand-rolled,
 // so a future change to their shape shows up here.
@@ -42,7 +39,7 @@ vi.mock("../lib/drupal-mcp-client", () => ({
 
 import { callDrupalMcp } from "../lib/drupal-mcp-client";
 import { createDrupalPrimitiveHandlers } from "../mcp/handlers";
-import { registerDrupalConnector, _resetDrupalDepsForTests, type CmsReviewSeam } from "../deps";
+import { registerDrupalConnector, _resetDrupalDepsForTests } from "../deps";
 
 // ---------------------------------------------------------------------------
 // The failure shapes, before and after. Each pair is the SAME underlying
@@ -90,22 +87,7 @@ const INSTANCE = {
   updatedAt: "",
 };
 
-function makeSeam(overrides: Partial<CmsReviewSeam> = {}): CmsReviewSeam {
-  return {
-    isReviewActive: () => true,
-    captureStagedWrite: vi.fn(async () => ({
-      operationId: "op-1",
-      gate: { gateId: "g-1", runId: "r-1" },
-      disposition: "pending" as const,
-      pending: { held: true },
-    })),
-    resolveDisposition: vi.fn(async () => ({ disposition: "pending" as const, gate: null })),
-    recordApplyVerification: vi.fn(async () => ({ ok: true })),
-    ...overrides,
-  } as unknown as CmsReviewSeam;
-}
-
-function registerDeps(seam?: CmsReviewSeam) {
+function registerDeps() {
   registerDrupalConnector({
     decodeCursor: (cursor?: string) => (cursor ? Number(cursor) : 0),
     buildListPage: (items, total, offset, limit) => ({
@@ -125,7 +107,6 @@ function registerDeps(seam?: CmsReviewSeam) {
     deleteInstance: vi.fn(),
     listInstanceStatuses: vi.fn(async () => []),
     requireInstanceWriteAuthority: vi.fn(async () => {}),
-    ...(seam ? { cmsReview: seam } : {}),
   });
 }
 
@@ -138,60 +119,9 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// 1. The content-write gate. FAIL-CLOSED must survive the class swap.
-// ---------------------------------------------------------------------------
-describe("staged-write review gate — fail-CLOSED on an unavailable MCP read", () => {
-  it.each(FAILURES)(
-    "refuses drupal_node_update and writes NOTHING when the current-node read rejects with %s",
-    async (_label, make) => {
-      const seam = makeSeam();
-      registerDeps(seam);
-      // The full-field read is the FIRST call; it fails. Any later call would be
-      // the write itself — which must never happen.
-      vi.mocked(callDrupalMcp).mockRejectedValue(make());
-
-      const handlers = createDrupalPrimitiveHandlers();
-      await expect(
-        handlers.drupal_node_update({
-          input: { instanceId: "d-1", nodeId: "5", fields: { title: "new" } },
-        } as never),
-      ).rejects.toThrow(/unavailable/);
-
-      // The gate refused BEFORE any write. Asserted as the EXACT call sequence
-      // rather than "the write is absent": the only MCP call made was the
-      // full-field read that failed, so there is no room for a second path to
-      // have reached Drupal.
-      expect(seam.captureStagedWrite).not.toHaveBeenCalled();
-      expect(vi.mocked(callDrupalMcp).mock.calls.map((c) => c[1])).toEqual([
-        "mcp_jsonapi_list_entities",
-      ]);
-    },
-  );
-
-  it.each(FAILURES)(
-    "refuses drupal_node_publish and publishes NOTHING when the current-node read rejects with %s",
-    async (_label, make) => {
-      const seam = makeSeam();
-      registerDeps(seam);
-      vi.mocked(callDrupalMcp).mockRejectedValue(make());
-
-      const handlers = createDrupalPrimitiveHandlers();
-      await expect(
-        handlers.drupal_node_publish({ input: { instanceId: "d-1", nodeId: "5" } } as never),
-      ).rejects.toThrow(/unavailable/);
-
-      expect(seam.captureStagedWrite).not.toHaveBeenCalled();
-      expect(vi.mocked(callDrupalMcp).mock.calls.map((c) => c[1])).toEqual([
-        "mcp_jsonapi_list_entities",
-      ]);
-    },
-  );
-});
-
-// ---------------------------------------------------------------------------
-// 2. The read fallback. FAIL-SOFT must also survive the class swap — the other
-//    direction of the same audit. A gate that stopped falling back would turn a
-//    transient jsonapi outage into a hard read failure.
+// 2. The read fallback. FAIL-SOFT must survive the class swap. A fallback that
+//    stopped falling back would turn a transient jsonapi outage into a hard
+//    read failure.
 // ---------------------------------------------------------------------------
 describe("drupal_node_get — fail-SOFT fallback to the recent-content summary", () => {
   it.each(FAILURES)(
@@ -227,8 +157,9 @@ describe("drupal_node_get — fail-SOFT fallback to the recent-content summary",
 // ---------------------------------------------------------------------------
 describe("the surface the consumers read", () => {
   // Not a proof that consumers read only this — that is the audit's job, and the
-  // two decision suites above are where it is locked. This pins the property the
-  // audited consumers DO read (`mcp/toolbox.ts` stringifies `err.message`),
+  // read-fallback suite above is where the decision is locked. This pins the
+  // property the audited consumers DO read (`mcp/toolbox.ts` stringifies
+  // `err.message`),
   // across both vocabularies, so a v2 shape that stopped being an `Error` or
   // arrived message-less would fail here rather than degrade a log line.
   it.each(FAILURES)("%s is an Error with a non-empty message", (_label, make) => {

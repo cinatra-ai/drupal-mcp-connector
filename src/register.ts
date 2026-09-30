@@ -32,7 +32,6 @@ import type {
 import {
   registerDrupalConnector,
   type DrupalConnectorDeps,
-  type CmsReviewSeam,
 } from "./deps";
 import {
   buildDrupalInstanceClient,
@@ -106,43 +105,6 @@ function hostService<T>(ctx: ExtensionHostContext, capability: string): T {
   return provider.impl as T;
 }
 
-/** OPTIONAL host-service resolution — returns null when the capability is not
- * registered (a pre-S5 / standalone host) instead of failing loud. Used for the
- * S7 CMS-review seam, whose absence must degrade to fence-OFF byte-identity. */
-function hostServiceOptional<T>(ctx: ExtensionHostContext, capability: string): T | null {
-  const provider = ctx.capabilities.resolveProviders(capability)[0];
-  return (provider?.impl as T | undefined) ?? null;
-}
-
-/**
- * Build the S7 CMS content-review seam (cinatra#2045). Every member resolves the
- * `@cinatra-ai/host:cms-review` capability LAZILY at call time (probe-safe, no
- * resolution at construction). `isReviewActive()` degrades to `false` when the
- * host does not publish the capability (a pre-S5 / standalone host) → the staged
- * content-write path stays byte-identical (fence OFF). The write-driving members
- * fail LOUD if the capability is absent while the fence read active — an
- * incoherent state the trigger never reaches, guarded defensively.
- */
-function buildCmsReviewSeam(ctx: ExtensionHostContext): CmsReviewSeam {
-  const optional = () => hostServiceOptional<CmsReviewSeam>(ctx, "@cinatra-ai/host:cms-review");
-  const required = (): CmsReviewSeam => {
-    const svc = optional();
-    if (!svc) {
-      throw new Error(
-        `${PACKAGE_NAME}: host service "@cinatra-ai/host:cms-review" is not registered, ` +
-          "but the review fence read active — the host S5 wiring must publish it.",
-      );
-    }
-    return svc;
-  };
-  return {
-    isReviewActive: () => optional()?.isReviewActive() ?? false,
-    captureStagedWrite: (input) => required().captureStagedWrite(input),
-    resolveDisposition: (input) => required().resolveDisposition(input),
-    recordApplyVerification: (input) => required().recordApplyVerification(input),
-  };
-}
-
 /** The connector-authored nango-system surface (registered by the nango
  * gateway's own register(ctx) — a systemExtension, required at boot). */
 function nangoSystem(ctx: ExtensionHostContext): NangoSystemSurface {
@@ -213,12 +175,6 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): DrupalConnectorDeps {
     // unguarded), the same as a real deny.
     requireInstanceWriteAuthority: async (input) =>
       writeAuthority().selectForConnector("drupal").requireWrite(input),
-    // cinatra#2045 S7 — the CMS content-review seam. Always constructed (its
-    // members resolve the host capability lazily); `isReviewActive()` degrades to
-    // false when the host does not publish `@cinatra-ai/host:cms-review`, so a
-    // pre-S5 host keeps byte-identical write behavior. Constructing does no
-    // resolution and no I/O (probe-safe).
-    cmsReview: buildCmsReviewSeam(ctx),
   };
 }
 
