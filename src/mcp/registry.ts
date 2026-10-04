@@ -91,12 +91,12 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
   },
   drupal_node_update: {
     description:
-      "Update a Drupal node fields. The nodeId is converted to a numeric nid. Caller must call drupal_node_create_draft_revision first if the node is published.",
+      "Update fields on an existing unpublished Drupal node after reading its actual status. Refuses published or unknown-status nodes: generic update cannot target a protected draft revision.",
     inputSchema: nodeUpdateSchema,
   },
   drupal_node_create_draft_revision: {
     description:
-      "Create a new draft content node of a given bundle (type). Uses mcp_create_content with status:false. Call BEFORE drupal_node_update when the node is published.",
+      "Request an atomic protected draft edit of the SAME published node using instanceId, nodeId and fields. Discovers an authorized non-published, non-default moderation state and retains CMS review. Refuses before content writes when moderation or exact-revision MCP read capability is unavailable. Never creates a new node; never follow it with generic update.",
     inputSchema: nodeCreateDraftSchema,
   },
   drupal_node_list: {

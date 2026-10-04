@@ -93,7 +93,7 @@ describe("cinatra#409 — per-user write authorization in the Drupal MCP write h
     requireInstanceWriteAuthorityMock.mockReset();
     requireInstanceWriteAuthorityMock.mockResolvedValue(undefined);
     vi.mocked(callDrupalMcp).mockReset();
-    vi.mocked(callDrupalMcp).mockResolvedValue({ ok: true });
+    vi.mocked(callDrupalMcp).mockImplementation(async (_instance, tool) => tool === "mcp_jsonapi_list_entities" ? { items: [{ id: 5, bundle: "article", status: false, fields: { nid: 5, title: "Old" } }] } : { ok: true });
     registerDepsStub();
   });
 
@@ -108,7 +108,7 @@ describe("cinatra#409 — per-user write authorization in the Drupal MCP write h
     },
     {
       primitive: "drupal_node_create_draft_revision",
-      input: { instanceId: "site-A", nodeBundle: "article", title: "Draft" },
+      input: { instanceId: "site-A", nodeId: "5", fields: { title: "Draft" } },
     },
     {
       primitive: "drupal_node_publish",
@@ -119,19 +119,26 @@ describe("cinatra#409 — per-user write authorization in the Drupal MCP write h
   // ---- ALLOW: entitled user -> write proceeds ----
   for (const { primitive, input } of writeCases) {
     it(`${primitive}: entitled user -> the gate is invoked with the named instance, then the write dispatches`, async () => {
-      await (handlers as any)[primitive]({
+      const invoke = () => (handlers as any)[primitive]({
         primitiveName: primitive,
         input,
         actor: { actorType: "model", source: "agent" },
         mode: "agentic",
       });
+      if (primitive === "drupal_node_create_draft_revision") {
+        await expect(invoke()).rejects.toThrow(/moderation/);
+        expect(vi.mocked(callDrupalMcp).mock.calls.every((call) => !["mcp_create_content", "mcp_update_content"].includes(call[1]))).toBe(true);
+      } else {
+        await invoke();
+        expect(vi.mocked(callDrupalMcp).mock.calls.some((call) => call[1] === (primitive === "drupal_node_update" ? "mcp_update_content" : "mcp_publish_content"))).toBe(true);
+      }
       // Gate was asked about the EXACT instanceId argument + the primitive name.
       expect(requireInstanceWriteAuthorityMock).toHaveBeenCalledWith({
         instanceId: "site-A",
         primitiveName: primitive,
       });
       // Only after the gate allowed does the write reach the Drupal site.
-      expect(callDrupalMcp).toHaveBeenCalledTimes(1);
+      expect(callDrupalMcp).toHaveBeenCalled();
     });
   }
 

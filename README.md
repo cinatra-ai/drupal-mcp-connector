@@ -1,6 +1,6 @@
 # Drupal MCP
 
-Let Cinatra agents read, draft, and publish content on your Drupal sites. Connect one or more Drupal instances and your agents can browse recent nodes, create draft revisions, update fields, and push updates live.
+Let Cinatra agents read, draft, and publish content on your Drupal sites. Connect one or more Drupal instances to browse nodes, update unpublished fields, and publish by explicit request. Published-page edits require protected same-node draft support; this version refuses those edits while an exact-revision MCP reader is unavailable.
 
 **Install:** add the connector from the Cinatra marketplace. Your Drupal site must run `drupal/mcp_tools ^1.0` with its Streamable HTTP endpoint (`/_mcp_tools`) reachable from the Cinatra host. Create a Nango connection for the `cinatra-drupal` integration (provider: `private-api-bearer`), then open **Settings → Integrations → Drupal** to register each instance by site URL and Nango connection ID.
 
@@ -10,7 +10,7 @@ Let Cinatra agents read, draft, and publish content on your Drupal sites. Connec
 
 **Architecture:** the connector owns the Drupal MCP client and instance-settings store and registers the drupal-mcp and widget-auth capabilities itself at activation — the Cinatra core ships no Drupal client code. In dev, its `cinatra.devSetup` hook provisions the local Drupal fixture on boot.
 
-**API notes:** `drupal_node_get` proxies via the recent-content list (100 most-recent nodes). `drupal_node_update` needs a draft revision — call `drupal_node_create_draft_revision` first. Empty-string fields are stripped to prevent accidental wipes.
+**API notes:** `drupal_node_get` reads full fields through MCP, with a recent-content summary fallback on unavailability. `drupal_node_update` reads actual status and refuses published or unknown-status nodes. `drupal_node_create_draft_revision` takes `instanceId`, `nodeId` and `fields` for a protected edit of the same node; it never creates a new page. It currently refuses before content writes because the backend lacks exact-revision MCP readback. Content Moderation and supported revision-reading tools are required; a separate new page needs your explicit choice. Never follow a draft request with generic update. Empty-string fields are stripped to prevent accidental wipes.
 
 **Development:** run `pnpm vitest run --no-coverage`. See `AGENTS.md` for tool-name mapping and invariants.
 
@@ -24,7 +24,7 @@ Let Cinatra agents read, draft, and publish content on your Drupal sites. Connec
 
 - Browse and read recent Drupal nodes from inside an agent flow
 - Draft a new node of any configured content type
-- Update fields on an existing node through a clean draft revision
+- Update unpublished nodes; refuse unsafe edits to published pages
 - Publish a draft to make it live
 - Edit a Drupal node from a plain-language instruction
 - Chat with an in-CMS widget that edits the open node in the Drupal editor

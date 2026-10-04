@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { ExtensionPrimitiveRequest } from "@cinatra-ai/sdk-extensions";
 
 import { callDrupalMcp } from "../lib/drupal-mcp-client";
+import { nodePublishedStatus, planProtectedDraft } from "../integration/protected-draft";
 // Host-shared runtime surfaces (pagination + A2A dispatch + the instance-admin
 // reads — `@/lib/drupal-api` stays host-side, cinatra#172 Stage H2) are
 // resolved via DI so this package carries no non-SDK `@cinatra-ai/*` code
@@ -58,8 +59,8 @@ function stripCodeFences(text: string): string {
 // ---------------------------------------------------------------------------
 const TOOL = {
   UPDATE: "mcp_update_content",
-  // mcp_create_content with status:false creates a draft revision
-  CREATE_DRAFT: "mcp_create_content",
+  MODERATION_STATE: "mcp_moderation_get_state",
+  MODERATION_WORKFLOW: "mcp_moderation_get_workflow",
   // drupal_node_get's PRIMARY full-field read. mcp_jsonapi_list_entities
   // (drupal/mcp_tools `mcp_tools_jsonapi` submodule) runs an entity query over
   // MCP and returns each match through `serializeEntity`, which carries the
@@ -93,16 +94,15 @@ export const nodeGetSchema = z.object({
 
 export const nodeUpdateSchema = z.object({
   instanceId: z.string().min(1),
-  nodeId: z.string().min(1),
+  nodeId: z.string().regex(/^[1-9]\d*$/),
   fields: z.record(z.string(), z.unknown()),
 });
 
 export const nodeCreateDraftSchema = z.object({
   instanceId: z.string().min(1),
-  nodeBundle: z.string().min(1),
-  title: z.string().min(1),
-  fields: z.record(z.string(), z.unknown()).optional(),
-});
+  nodeId: z.string().regex(/^[1-9]\d*$/),
+  fields: z.record(z.string(), z.unknown()),
+}).strict();
 
 export const nodeListSchema = z.object({
   instanceId: z.string().min(1),
@@ -296,6 +296,8 @@ async function readNodeViaMcp(
     // Confirm the returned entity is the requested node (defensive: the filter
     // already scopes to this nid). `fields.nid` is the base-field backstop.
     const fieldNid = (obj.fields as { nid?: unknown } | undefined)?.nid;
+    if (obj.entity_type != null && obj.entity_type !== "node") return false;
+    if (obj.id != null && fieldNid != null && Number(obj.id) !== Number(fieldNid)) return false;
     return Number(obj.id) === nid || Number(fieldNid) === nid;
   });
   return hit ? flattenMcpNode(hit) : null;
@@ -462,12 +464,23 @@ export function createDrupalPrimitiveHandlers() {
         throw new Error("All submitted fields were empty strings — nothing to update.");
       }
 
+      // The default node is the only target generic update can address. Never
+      // interpret an earlier draft call or caller status as revision authority.
+      const current = await readNodeForReview(instance, nid);
+      const published = nodePublishedStatus(current?.status);
+      if (!current || current.nid !== nid || current.id !== String(nid) || published === null) {
+        throw new Error("Cannot establish current node status (read unavailable or unsupported); refusing a content update.");
+      }
+      if (published) {
+        throw new Error("Published nodes require a protected draft edit; generic update cannot target that revision.");
+      }
+
       // cinatra#2045 S7 — review-before-publish TRIGGER at the staged content-write
       // seam. When the host review fence is ON, the PROPOSED node state is captured
       // as an immutable review target and the effect is HELD before it can reach
       // Drupal; only an approved gate releases the apply. FENCE-OFF / no seam bound
-      // → `{action:"pass"}` with no capture and no extra read, so the write below is
-      // byte-identical to pre-S7. Placed AFTER the empty-field sanitation so the
+      // → `{action:"pass"}` with no capture; the mandatory status guard still reads.
+      // The unpublished-node update payload remains unchanged. Placed AFTER the empty-field sanitation so the
       // reviewed proposal is exactly the field map the write would send.
       const review = await evaluateStagedNodeWrite({
         seam: getDrupalDeps().cmsReview,
@@ -475,7 +488,7 @@ export function createDrupalPrimitiveHandlers() {
         siteUrl: instance.siteUrl,
         nodeId: nid,
         proposed: safeFields,
-        fetchCurrent: () => readNodeForReview(instance, nid),
+        fetchCurrent: async () => current,
       });
       // HELD: the effect is held pending review — the write does NOT reach Drupal.
       if (review.action === "hold") return review.pending;
@@ -499,25 +512,41 @@ export function createDrupalPrimitiveHandlers() {
     drupal_node_create_draft_revision: async (request: ExtensionPrimitiveRequest<unknown>) => {
       const input = nodeCreateDraftSchema.parse(request.input);
       const instance = await resolveInstance(input.instanceId);
-      // cinatra#409 — per-user / per-instance write authorization (fail-closed).
       await requireWriteAuthority(input.instanceId, "drupal_node_create_draft_revision");
-      // Strip empty-string fields. Same threat class as drupal_node_update:
-      // an LLM emitting `{ body: "" }` would otherwise create a draft with an
-      // empty body. Strict equality on "" only; null/false/0 pass through.
-      const safeFields = input.fields
-        ? Object.fromEntries(
-            Object.entries(input.fields).filter(([, v]) => v !== ""),
-          )
-        : undefined;
-      // mcp_create_content with status:false creates a draft (not published)
-      return callDrupalMcp(instance, TOOL.CREATE_DRAFT, {
-        type: input.nodeBundle,
-        title: input.title,
-        ...(safeFields && Object.keys(safeFields).length > 0
-          ? { fields: safeFields }
-          : {}),
-        status: false,
+      const nid = Number(input.nodeId);
+      const fields = Object.fromEntries(Object.entries(input.fields).filter(([, value]) => value !== ""));
+      if (Object.keys(fields).length === 0) throw new Error("No changed fields for a protected draft.");
+      const current = await readNodeForReview(instance, nid);
+      let moderation: unknown;
+      let workflow: unknown;
+      try {
+        moderation = await callDrupalMcp(instance, TOOL.MODERATION_STATE, { entity_type: "node", entity_id: nid });
+        const workflowId = moderation && typeof moderation === "object"
+          ? (moderation as Record<string, unknown>).workflow_id : undefined;
+        if (typeof workflowId !== "string" || !workflowId.trim()) {
+          throw new Error("workflow identity unavailable");
+        }
+        workflow = await callDrupalMcp(instance, TOOL.MODERATION_WORKFLOW, { id: workflowId });
+      } catch {
+        throw new Error("Protected draft unavailable: moderation workflow metadata or transition permission could not be established. Enable Content Moderation and its MCP tools, check your workflow permission, or explicitly choose a separate new page. No Drupal content was written.");
+      }
+      const plan = planProtectedDraft(nid, fields, current, moderation, workflow);
+      // The derived false status is PROPOSED draft intent, not a persisted read.
+      // The live default preimage remains published. Keep the mandatory review
+      // disposition/CAS seam; no captured or approved effect may bypass it.
+      const review = await evaluateStagedNodeWrite({
+        seam: getDrupalDeps().cmsReview,
+        instanceId: input.instanceId, siteUrl: instance.siteUrl, nodeId: nid,
+        proposed: plan.proposed, fetchCurrent: async () => current,
       });
+      if (review.action === "hold") return review.pending;
+      if (review.action === "reject") throw new Error(`Protected draft refused: ${review.reason}`);
+      // The installed MCP tools cannot independently read a specified revision.
+      // Re-reading the default node would inspect the unchanged live page and
+      // falsely verify (or drift) the draft. Do not invent a revision_id input,
+      // add direct REST egress, or dispatch plan.updates before a real reader is
+      // available. Safe same-node atomic apply remains an explicit dependency.
+      throw new Error("Protected draft unavailable: exact draft-revision MCP read capability is missing. No Drupal content was written; enable a supported revision reader or explicitly choose a separate new page.");
     },
 
     drupal_node_list: async (request: ExtensionPrimitiveRequest<unknown>) => {
