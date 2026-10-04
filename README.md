@@ -1,31 +1,30 @@
 # Drupal MCP
 
-Let Cinatra agents read, draft, and publish content on your Drupal sites. Connect one or more Drupal instances to browse nodes, update unpublished fields, and publish by explicit request. Published-page edits require protected same-node draft support; this version refuses those edits while an exact-revision MCP reader is unavailable.
+Read and explicitly publish Drupal content from Cinatra agents. Update unpublished nodes. Published-page edits are refused before content writes until an exact-revision MCP reader supports protected same-node drafts.
 
-**Install:** add the connector from the Cinatra marketplace. Your Drupal site must run `drupal/mcp_tools ^1.0` with its Streamable HTTP endpoint (`/_mcp_tools`) reachable from the Cinatra host. Create a Nango connection for the `cinatra-drupal` integration (provider: `private-api-bearer`), then open **Settings → Integrations → Drupal** to register each instance by site URL and Nango connection ID.
+**Install:** add the connector from the Cinatra marketplace. Install `drupal/mcp_tools ^1.0` on Drupal and expose `/_mcp_tools` to Cinatra. Create a Nango `cinatra-drupal` connection (provider: `private-api-bearer`); register each site URL and connection ID in **Settings → Integrations → Drupal**.
 
-**Usage:** agents discover instances via `drupal_instances_list`; ask an agent to list recent nodes, create a draft, update fields, or publish. `drupal_content_editor_run` turns a plain-language instruction into the full draft-revision workflow.
+**Usage:** discover sites with `drupal_instances_list`; ask an agent to read nodes, update unpublished fields or publish explicitly. `drupal_content_editor_run` accepts plain-language edits.
 
-**Configuration:** each instance needs a `siteUrl` and a `nangoConnectionId`; no plaintext credentials are stored — the Bearer token lives only in the Nango vault, resolved at call time.
+**Configuration:** supply `siteUrl` and `nangoConnectionId` per instance. Bearer tokens stay in the Nango vault and are resolved at call time.
 
-**Architecture:** the connector owns the Drupal MCP client and instance-settings store and registers the drupal-mcp and widget-auth capabilities itself at activation — the Cinatra core ships no Drupal client code. In dev, its `cinatra.devSetup` hook provisions the local Drupal fixture on boot.
+**Architecture:** the connector owns the MCP client, instance settings and activation of drupal-mcp/widget-auth capabilities. Its `cinatra.devSetup` hook provisions the local fixture.
 
-**API notes:** `drupal_node_get` reads full fields through MCP, with a recent-content summary fallback on unavailability. `drupal_node_update` reads actual status and refuses published or unknown-status nodes. `drupal_node_create_draft_revision` takes `instanceId`, `nodeId` and `fields` for a protected edit of the same node; it never creates a new page. It currently refuses before content writes because the backend lacks exact-revision MCP readback. Content Moderation and supported revision-reading tools are required; a separate new page needs your explicit choice. Never follow a draft request with generic update. Empty-string fields are stripped to prevent accidental wipes.
+**API notes:** `drupal_node_get` reads fields via MCP, falling back to recent-content summaries. `drupal_node_update` reads actual status and refuses published or unknown-status nodes. `drupal_node_create_draft_revision` accepts `instanceId`, `nodeId`, `fields` for the SAME node, never a stray new page or live-default write. It currently refuses before content writes: Content Moderation and exact-revision MCP readback are required. Never follow it with generic update. Creating a separate page is your own explicit action, not a connector operation. Empty-string fields are stripped to prevent wipes.
 
-**Development:** run `pnpm vitest run --no-coverage`. See `AGENTS.md` for tool-name mapping and invariants.
+**Development:** `pnpm vitest run --no-coverage`; see `AGENTS.md` for mappings and invariants.
 
-**Troubleshooting:** if `drupal_status` reports an instance unreachable, verify `/_mcp_tools` is reachable and the Nango connection is active; a `401` means the Bearer token expired — regenerate it and update the Nango connection.
+**Troubleshooting:** check `/_mcp_tools` reachability and Nango connection for an unreachable `drupal_status`; renew the Bearer token for a `401`.
 
 ## Works with
 
-- Drupal 10 and 11 with the `drupal/mcp_tools` module installed
+- Drupal 10 and 11 with `drupal/mcp_tools`
 
 ## Capabilities
 
-- Browse and read recent Drupal nodes from inside an agent flow
-- Draft a new node of any configured content type
-- Update unpublished nodes; refuse unsafe edits to published pages
-- Publish a draft to make it live
-- Edit a Drupal node from a plain-language instruction
-- Chat with an in-CMS widget that edits the open node in the Drupal editor
-- Receive a webhook notification when a node is published on a connected site
+- Browse and read recent nodes
+- Update unpublished nodes; refuse unsafe published-page edits
+- Publish by explicit request
+- Edit nodes from plain-language instructions
+- Edit the open node through an in-CMS chat widget
+- Receive node-publication webhooks
