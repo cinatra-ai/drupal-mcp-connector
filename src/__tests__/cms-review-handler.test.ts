@@ -52,7 +52,7 @@ const entity = (fields: Record<string, unknown> = {}) => ({
       uuid: "u-7",
       bundle: "article",
       label: "Old title",
-      status: true,
+      status: false,
       fields: { nid: 7, title: "Old title", body: "<p>Old body</p>", ...fields },
     },
   ],
@@ -61,12 +61,14 @@ const entity = (fields: Record<string, unknown> = {}) => ({
 
 /** Route the single callDrupalMcp mock by tool name. `postApply` (when given) is
  * the field map the SECOND read (the independent post-apply re-read) returns. */
-function routeMcp(opts: { postApply?: Record<string, unknown> } = {}) {
+function routeMcp(opts: { postApply?: Record<string, unknown>; published?: boolean } = {}) {
   let reads = 0;
   vi.mocked(callDrupalMcp).mockImplementation(async (_instance, tool) => {
     if (tool === READ_TOOL) {
       reads += 1;
-      return reads > 1 && opts.postApply ? entity(opts.postApply) : entity();
+      const envelope = reads > 1 && opts.postApply ? entity(opts.postApply) : entity();
+      envelope.items[0].status = opts.published ?? false;
+      return envelope;
     }
     return { success: true };
   });
@@ -98,24 +100,24 @@ beforeEach(() => {
 });
 
 describe("drupal_node_update — S7 review trigger", () => {
-  it("FENCE OFF (no cmsReview seam): byte-identical — updates with no read and no capture", async () => {
+  it("FENCE OFF (no cmsReview seam): preserves unpublished update payload after status read", async () => {
     registerStubDeps();
     routeMcp();
     const res = await createDrupalPrimitiveHandlers().drupal_node_update({
       input: { instanceId: "site-1", nodeId: "7", fields: { title: "New title" } },
     } as never);
-    expect(toolsCalled()).toEqual([UPDATE_TOOL]);
+    expect(toolsCalled()).toEqual([READ_TOOL, UPDATE_TOOL]);
     expect(res).toEqual({ success: true });
   });
 
-  it("FENCE OFF (seam bound, isReviewActive false): byte-identical, no read/capture", async () => {
+  it("FENCE OFF (seam bound, isReviewActive false): status read, no capture", async () => {
     const seam = makeSeam({ isReviewActive: () => false });
     registerStubDeps({ cmsReview: seam });
     routeMcp();
     await createDrupalPrimitiveHandlers().drupal_node_update({
       input: { instanceId: "site-1", nodeId: "7", fields: { title: "New title" } },
     } as never);
-    expect(toolsCalled()).toEqual([UPDATE_TOOL]);
+    expect(toolsCalled()).toEqual([READ_TOOL, UPDATE_TOOL]);
     expect(seam.captureStagedWrite).not.toHaveBeenCalled();
   });
 
@@ -155,7 +157,7 @@ describe("drupal_node_update — S7 review trigger", () => {
     expect(readback.postApplyFields).toEqual({
       title: "New title",
       body: "<p>Old body</p>[rewritten]",
-      status: "published",
+      status: "unpublished",
       // `flattenMcpNode` always surfaces `summary` (the module collapses the
       // compound body field), so it is part of the reviewed projection on BOTH
       // sides — symmetric, and therefore never drift.
@@ -182,7 +184,7 @@ describe("drupal_node_update — S7 review trigger", () => {
 describe("drupal_node_publish — S7 review trigger (the Drupal-only publish seam)", () => {
   it("FENCE OFF: byte-identical — publishes with no read and no capture", async () => {
     registerStubDeps();
-    routeMcp();
+    routeMcp({ published: true });
     await createDrupalPrimitiveHandlers().drupal_node_publish({
       input: { instanceId: "site-1", nodeId: "7" },
     } as never);
@@ -214,7 +216,7 @@ describe("drupal_node_publish — S7 review trigger (the Drupal-only publish sea
   it("FENCE ON, already-published node: no gate, the publish call proceeds unchanged", async () => {
     const seam = makeSeam();
     registerStubDeps({ cmsReview: seam });
-    routeMcp();
+    routeMcp({ published: true });
     await createDrupalPrimitiveHandlers().drupal_node_publish({
       input: { instanceId: "site-1", nodeId: "7" },
     } as never);
