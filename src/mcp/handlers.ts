@@ -6,7 +6,13 @@ import { z } from "zod";
 import type { ExtensionPrimitiveRequest } from "@cinatra-ai/sdk-extensions";
 
 import { callDrupalMcp } from "../lib/drupal-mcp-client";
-import { nodePublishedStatus, planProtectedDraft } from "../integration/protected-draft";
+import { nodePublishedStatus } from "../integration/protected-draft";
+import {
+  MODULE_READ_REVISION, MODULE_WRITE_DRAFT, prepareModuleDraft,
+  structureModuleUpdates, verifyModuleRevision, moduleRevisionReviewNode,
+  reportedModuleRevisionId,
+  type ModuleDraftIdentity, type ModuleDraftPlan,
+} from "../integration/module-protected-draft";
 // Host-shared runtime surfaces (pagination + A2A dispatch + the instance-admin
 // reads — `@/lib/drupal-api` stays host-side, cinatra#172 Stage H2) are
 // resolved via DI so this package carries no non-SDK `@cinatra-ai/*` code
@@ -21,6 +27,8 @@ import type {
 import {
   evaluateStagedNodeWrite,
   projectNodeFields,
+  stableStringify,
+  DRUPAL_SYSTEM_FIELD_PATHS,
   DRUPAL_STATUS_PUBLISHED,
   type DrupalRawNode,
   type StagedNodeWriteDecision,
@@ -59,8 +67,6 @@ function stripCodeFences(text: string): string {
 // ---------------------------------------------------------------------------
 const TOOL = {
   UPDATE: "mcp_update_content",
-  MODERATION_STATE: "mcp_moderation_get_state",
-  MODERATION_WORKFLOW: "mcp_moderation_get_workflow",
   // drupal_node_get's PRIMARY full-field read. mcp_jsonapi_list_entities
   // (drupal/mcp_tools `mcp_tools_jsonapi` submodule) runs an entity query over
   // MCP and returns each match through `serializeEntity`, which carries the
@@ -101,6 +107,8 @@ export const nodeUpdateSchema = z.object({
 export const nodeCreateDraftSchema = z.object({
   instanceId: z.string().min(1),
   nodeId: z.string().regex(/^[1-9]\d*$/),
+  language: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional(),
+  expectedFields: z.record(z.string(), z.unknown()).optional(),
   fields: z.record(z.string(), z.unknown()),
 }).strict();
 
@@ -330,19 +338,19 @@ async function readNodeForReview(
 
 /**
  * Record the post-apply read-back verification for an APPROVED, applied staged
- * write. The re-read is INDEPENDENT (a fresh `mcp_jsonapi_list_entities`, NOT the
- * write response): the update reply echoes what the write requested, so it could
- * never surface a SITE-MODULE REWRITE-ON-SAVE — re-reading the persisted node is
- * what lets the verifier catch an out-of-scope rewrite as `drifted`.
+ * write. Generic writes use a fresh default-node MCP read; a protected write
+ * supplies its fresh exact-revision node. Neither route verifies a request echo
+ * or substitutes the published default for a non-default draft.
  */
 async function recordApplyReadback(
   instance: DrupalMcpInstance,
   nid: number,
   review: Extract<StagedNodeWriteDecision, { action: "apply" }>,
+  exactRevisionNode?: DrupalRawNode,
 ): Promise<Record<string, unknown>> {
   const seam = getDrupalDeps().cmsReview;
   if (!seam) return { operationId: review.operationId, ok: false, code: "seam-unbound" };
-  const postApply = await readNodeForReview(instance, nid);
+  const postApply = exactRevisionNode ?? await readNodeForReview(instance, nid);
   if (!postApply) {
     return { operationId: review.operationId, ok: false, code: "post-apply-read-unavailable" };
   }
@@ -516,37 +524,123 @@ export function createDrupalPrimitiveHandlers() {
       const nid = Number(input.nodeId);
       const fields = Object.fromEntries(Object.entries(input.fields).filter(([, value]) => value !== ""));
       if (Object.keys(fields).length === 0) throw new Error("No changed fields for a protected draft.");
-      const current = await readNodeForReview(instance, nid);
-      let moderation: unknown;
-      let workflow: unknown;
-      try {
-        moderation = await callDrupalMcp(instance, TOOL.MODERATION_STATE, { entity_type: "node", entity_id: nid });
-        const workflowId = moderation && typeof moderation === "object"
-          ? (moderation as Record<string, unknown>).workflow_id : undefined;
-        if (typeof workflowId !== "string" || !workflowId.trim()) {
-          throw new Error("workflow identity unavailable");
-        }
-        workflow = await callDrupalMcp(instance, TOOL.MODERATION_WORKFLOW, { id: workflowId });
-      } catch {
-        throw new Error("Protected draft unavailable: moderation workflow metadata or transition permission could not be established. Enable Content Moderation and its MCP tools, check your workflow permission, or explicitly choose a separate new page. No Drupal content was written.");
+      if (!Number.isSafeInteger(nid) || Object.keys(fields).some((name) => DRUPAL_SYSTEM_FIELD_PATHS.includes(name))) {
+        throw new Error("Protected draft unavailable: a safe node identity and reviewable content fields are required.");
       }
-      const plan = planProtectedDraft(nid, fields, current, moderation, workflow);
-      // The derived false status is PROPOSED draft intent, not a persisted read.
-      // The live default preimage remains published. Keep the mandatory review
-      // disposition/CAS seam; no captured or approved effect may bypass it.
+      const current = await readNodeForReview(instance, nid);
+      if (!current || current.nid !== nid || current.id !== String(nid)
+        || nodePublishedStatus(current.status) !== true || typeof current.uuid !== "string" || !current.uuid) {
+        throw new Error("Protected draft unavailable: the actual published node identity could not be read.");
+      }
+      const language = input.language ?? current.langcode;
+      if (typeof language !== "string" || !/^[a-zA-Z0-9_-]+$/.test(language)) {
+        throw new Error("Protected draft unavailable: the exact language is absent; read it or supply an explicit translation.");
+      }
+      const expected: ModuleDraftIdentity = { nid, uuid: current.uuid, language, fields: Object.keys(fields).sort() };
+      const readPreimage = async (identity: ModuleDraftIdentity): Promise<ModuleDraftPlan> => {
+        let result: unknown;
+        try {
+          result = await callDrupalMcp(instance, MODULE_READ_REVISION, { nid, language, fields: identity.fields });
+        } catch {
+          throw new Error("Protected draft unavailable: the existing Cinatra module's authorized preimage reader is unavailable. Update and expose its supported MCP tools and check read permission. No Drupal content was written.");
+        }
+        return prepareModuleDraft(result, identity);
+      };
+      const requestedPlan = await readPreimage(expected);
+      const available = requestedPlan.preimage.available_fields;
+      if (!available?.length || new Set(available).size !== available.length || expected.fields.some((name) => !available.includes(name))) {
+        throw new Error("Protected draft unavailable: the complete readable field names are missing from the module preimage.");
+      }
+      const fullIdentity = { ...expected, fields: [...available].sort() };
+      const plan = stableStringify(fullIdentity.fields) === stableStringify(expected.fields)
+        ? requestedPlan : await readPreimage(fullIdentity);
+      if (plan.state !== requestedPlan.state
+        || plan.preimage.default_revision_id !== requestedPlan.preimage.default_revision_id
+        || plan.preimage.workflow_fingerprint !== requestedPlan.preimage.workflow_fingerprint
+        || plan.preimage.preimage_fingerprint !== requestedPlan.preimage.preimage_fingerprint
+        || stableStringify([...(plan.preimage.available_fields ?? [])].sort()) !== stableStringify(fullIdentity.fields)
+        || expected.fields.some((name) => stableStringify(plan.preimage.fields[name]) !== stableStringify(requestedPlan.preimage.fields[name]))) {
+        throw new Error("Protected draft unavailable: the language-bound content or workflow preimage changed between reads; read the page again.");
+      }
+      const updates = structureModuleUpdates(fields, plan.preimage.fields);
+      if (input.expectedFields !== undefined) {
+        if (stableStringify(Object.keys(input.expectedFields).sort()) !== stableStringify(expected.fields)
+          || stableStringify(structureModuleUpdates(input.expectedFields, plan.preimage.fields))
+            !== stableStringify(Object.fromEntries(expected.fields.map((name) => [name, plan.preimage.fields[name]])))) {
+          throw new Error("Protected draft unavailable: a requested field changed since the earlier read; read and review the page again. No Drupal content was written.");
+        }
+      }
+      const structuredFields = Object.keys(fields).filter((name) => fields[name] !== null && typeof fields[name] === "object");
+      const reviewBefore = { ...moduleRevisionReviewNode({ ...plan.preimage, is_published: true }, structuredFields), bundle: current.bundle };
+      const proposedNode = moduleRevisionReviewNode({ ...plan.preimage, fields: { ...plan.preimage.fields, ...updates }, is_published: false }, structuredFields);
+      const proposed: DrupalRawNode = Object.fromEntries(Object.keys(updates).map((name) => [name, proposedNode[name]]));
+      if (Object.hasOwn(updates, "body")) proposed.summary = proposedNode.summary;
+      proposed.status = false;
+      // The module's stored preimage, not the default JSONAPI's flattened body,
+      // supplies the review/CAS base. Publication state is proposed intent only.
       const review = await evaluateStagedNodeWrite({
         seam: getDrupalDeps().cmsReview,
         instanceId: input.instanceId, siteUrl: instance.siteUrl, nodeId: nid,
-        proposed: plan.proposed, fetchCurrent: async () => current,
+        proposed, fetchCurrent: async () => reviewBefore,
+        additionalReviewPaths: fullIdentity.fields,
+        remoteRevisionBinding: stableStringify({
+          node_id: nid, uuid: expected.uuid, language,
+          default_revision_id: plan.preimage.default_revision_id,
+          latest_revision_id: plan.preimage.latest_revision_id,
+          workflow_fingerprint: plan.preimage.workflow_fingerprint,
+          preimage_fingerprint: plan.preimage.preimage_fingerprint,
+          draft_state: plan.state, before: plan.preimage.fields, updates,
+        }),
       });
       if (review.action === "hold") return review.pending;
       if (review.action === "reject") throw new Error(`Protected draft refused: ${review.reason}`);
-      // The installed MCP tools cannot independently read a specified revision.
-      // Re-reading the default node would inspect the unchanged live page and
-      // falsely verify (or drift) the draft. Do not invent a revision_id input,
-      // add direct REST egress, or dispatch plan.updates before a real reader is
-      // available. Safe same-node atomic apply remains an explicit dependency.
-      throw new Error("Protected draft unavailable: exact draft-revision MCP read capability is missing. No Drupal content was written; enable a supported revision reader or explicitly choose a separate new page.");
+      // From dispatch onward a transport failure cannot prove zero writes. The
+      // backend binds actual revision/configuration and owns the atomic save.
+      let returnedRevisionId: number | undefined;
+      try {
+        const writerResult = await callDrupalMcp(instance, MODULE_WRITE_DRAFT, {
+          nid, language, draft_state: plan.state,
+          expected_default_revision_id: plan.preimage.default_revision_id,
+          expected_latest_revision_id: plan.preimage.latest_revision_id,
+          workflow_fingerprint: plan.preimage.workflow_fingerprint,
+          preimage_fingerprint: plan.preimage.preimage_fingerprint,
+          updates,
+        });
+        // Retain a safely bound returned identifier as an inspection clue even
+        // when its field/status envelope fails the full success validation.
+        returnedRevisionId = reportedModuleRevisionId(writerResult, expected);
+        const written = verifyModuleRevision(writerResult, plan, expected);
+        const stored = verifyModuleRevision(await callDrupalMcp(instance, MODULE_READ_REVISION, {
+          nid, language, revision_id: written.revision_id, fields: fullIdentity.fields,
+        }), plan, fullIdentity, written.revision_id);
+        for (const name of fullIdentity.fields) {
+          const items = stored.fields[name];
+          if (!Object.hasOwn(updates, name)) {
+            if (stableStringify(items) !== stableStringify(plan.preimage.fields[name])) throw new Error("Unrequested stored field changed.");
+          } else {
+            if (stableStringify(items) !== stableStringify(written.fields[name])) throw new Error("Writer and exact reader disagree.");
+            if (!structuredFields.includes(name)) {
+              // A scalar value edit never authorizes a format/summary/schema
+              // change. Compare the full non-value item metadata separately.
+              const metadata = (values: Record<string, unknown>[]) => values.map((item) => Object.fromEntries(Object.entries(item).filter(([key]) => key !== "value")));
+              if (stableStringify(metadata(items)) !== stableStringify(metadata(plan.preimage.fields[name]))) throw new Error("Unrequested item metadata changed.");
+            }
+          }
+        }
+        const verification = review.action === "apply"
+          ? await recordApplyReadback(instance, nid, review, moduleRevisionReviewNode(stored, structuredFields)) : undefined;
+        if (verification && verification.ok !== true) throw new Error("The CMS apply verification did not pass.");
+        return {
+          nodeId: input.nodeId, revision_id: stored.revision_id, status: "draft", applied: true,
+          fields: stored.fields,
+          pendingDraft: { nodeId: input.nodeId, revisionId: stored.revision_id, language, beforeFields: plan.preimage.fields, fields: stored.fields },
+          ...(verification ? { review: verification } : {}),
+        };
+      } catch {
+        throw new Error("Protected draft verification failed after writer dispatch. A draft may have been saved; inspection required before retrying or claiming success. "
+          + (returnedRevisionId === undefined ? "" : `The writer returned revision ${returnedRevisionId} for node ${nid} in language ${language}. `)
+          + "The exact stored result could not be verified.");
+      }
     },
 
     drupal_node_list: async (request: ExtensionPrimitiveRequest<unknown>) => {
