@@ -96,7 +96,7 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
   },
   drupal_node_create_draft_revision: {
     description:
-      "Request an atomic protected draft edit of the SAME published node using instanceId, nodeId and fields. Discovers an authorized non-published, non-default moderation state and retains CMS review. Refuses before content writes when moderation or exact-revision MCP read capability is unavailable. Never creates a new node; never follow it with generic update.",
+      "Request an atomic protected draft edit of the SAME published node using instanceId, nodeId, fields, optional explicit language and optional expectedFields from an earlier read. Uses the existing Cinatra Drupal module's protected writer and exact-revision reader, preserves CMS approval bound to exact language/revision/configuration/content, and returns actual pendingDraft beforeFields and independently stored fields. Refuses stale expected fields, unavailable preimages or unsafe moderation before its writer; failed verification after dispatch requires inspection because a draft may have been saved. Never creates a new node or follows with generic update.",
     inputSchema: nodeCreateDraftSchema,
   },
   drupal_node_list: {

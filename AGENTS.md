@@ -16,7 +16,7 @@ The Cinatra primitive names (what the LLM calls) map to `drupal/mcp_tools` tool 
 | `drupal_instances_list` | — | Reads from DB; returns rows verbatim; credentials live only in the Nango vault and are resolved at call time |
 | `drupal_node_get` | `mcp_tools_get_recent_content` | **No get-by-ID tool exists** — pulls the recent-content list and finds the node by `id` / `nid`; `mcp_tools_search_content` requires ≥3-char queries and does not support nid-specific lookup |
 | `drupal_node_update` | `mcp_update_content` | `nid` sent as a string (PHP `strtolower()` type fix); maps `fields` input → `updates` arg |
-| `drupal_node_create_draft_revision` | Moderation metadata reads; protected atomic update blocked until exact-revision MCP reader exists | SAME nodeId + fields; never create a new node or modify the live default |
+| `drupal_node_create_draft_revision` | `cinatra_read_protected_revision` + `cinatra_write_protected_draft` in the existing Cinatra module | SAME nodeId + fields + optional exact language; atomic draft and independent exact-revision readback |
 | `drupal_node_list` | `mcp_tools_get_recent_content` | Returns `{ total, sorted_by, content: [...] }`; the handler unwraps the `content` array |
 | `drupal_node_publish` | `mcp_publish_content` | `nid` sent as a string + `publish: true` |
 | `drupal_content_editor_run` | — | A2A blocking dispatch to `wayflow-drupal-content-editor` (port 3020). Not an `mcp_tools` call |
@@ -25,7 +25,7 @@ Tool names were discovered by inspecting a live Drupal 11 + `drupal/mcp_tools ^1
 
 ## Key implementation invariants
 
-### `nid` must validate as a positive integer, then dispatch as a string
+### Generic MCP tools use string `nid`; Cinatra module tools use integer `nid`
 
 `mcp_update_content` and `mcp_publish_content` both validate the `nodeId` as a positive integer, then re-stringify before dispatch. The Cinatra primitive receives `nodeId` as a string (from JSON); the handler parses it to a number to reject non-numeric input, then sends `String(nid)` over the wire because `drupal/mcp_tools ^1.0` calls PHP `strtolower()` on the `nid` field and rejects non-string types:
 
@@ -36,6 +36,8 @@ if (!Number.isFinite(nid) || nid <= 0) {
 }
 return callDrupalMcp(instance, TOOL.UPDATE, { nid: String(nid), updates: safeFields });
 ```
+
+The Cinatra module reader/writer have integer Tool API inputs: validate a safe positive integer and dispatch integer `nid` on that path. The generic third-party string workaround does not apply to them.
 
 Sending `NaN` (from `parseInt("abc", 10)`) would otherwise serialise as `null` in JSON and produce an opaque error from Drupal — the parseInt step is purely a validation gate; the actual wire value is the string form.
 
@@ -153,7 +155,7 @@ if (Object.keys(safeFields).length === 0) {
 
 This prevents the LLM from issuing a no-op MCP call that the agent would otherwise treat as success. Mirrored on the WordPress side as `wordpress_post_update_meta`.
 
-The protected draft primitive takes `nodeId` and required `fields`; a title-only edit is `{fields:{title:"New title"}}`. The obsolete bundle/title new-node shape is rejected. The site must expose a per-user authorized non-published/non-default moderation transition for this existing published node. The planner proposes the derived draft publication state for review, but sends no literal status override. Until an actual MCP exact-revision reader is available, even an approved proposal refuses before any Drupal content write. A live-default read never verifies a protected draft. Keep MCP-only egress and the existing write-authority/CMS review gates; no fallback live update or separate new node.
+The protected draft primitive takes `nodeId`, required `fields`, optional `language` and optional `expectedFields`; a title-only edit is `{fields:{title:"New title"}}`. An omitted language comes only from the actual node read, never a guessed site default. The obsolete new-node shape is rejected. The site must install the supported existing Cinatra Drupal module and deliberately expose its two tools through its maintained MCP profile; missing contract or permissions fail closed. The module binds actual published preimage, workflow, content and revision identifiers, then saves one unpublished non-default revision atomically. When expectedFields is provided it must match actual stored requested fields; stale earlier reads refuse before review/write. The connector preserves the existing CMS review gate, binding its operation to exact language, revisions, full structured content and workflow tokens, dispatches integer node identity and structured values, then independently reads the exact returned revision with the full readable field set. Scalar edits preserve stored format/summary; explicit structured edits review those items symmetrically. `pendingDraft.beforeFields` is the bound module preimage; `pendingDraft.fields` and `pendingDraft.revisionId` come from the independent saved read, never a request echo or published-default substitute. Verification failure after writer dispatch reports inspection required and any returned revision identifier; it cannot promise zero writes. Keep MCP-only egress and the existing write-authority/CMS review gates; no generic live update or separate-node fallback.
 
 This is the deepest deterministic chokepoint between the LLM and the Drupal API. The SKILL.md warning ("Never pass an empty string for a field the user did not ask to change…") remains as an outer prescriptive layer; the runtime filter is the inner backstop. Do not remove the SKILL.md warning — defence-in-depth means each layer behaves as if it is the only one.
 

@@ -199,6 +199,7 @@ export function unreviewableProposalPaths(proposed: DrupalRawNode): string[] {
 export function resolveReviewablePaths(
   current: DrupalRawNode,
   proposed: DrupalRawNode,
+  additionalPaths: readonly string[] = [],
 ): string[] {
   const paths = new Set<string>();
   for (const p of DRUPAL_CORE_CONTENT_PATHS) {
@@ -208,6 +209,9 @@ export function resolveReviewablePaths(
     if (k.startsWith("field_")) paths.add(k);
   }
   for (const k of Object.keys(proposed)) paths.add(k);
+  for (const k of additionalPaths) {
+    if (Object.hasOwn(current, k)) paths.add(k);
+  }
   for (const sys of SYSTEM) paths.delete(sys);
   return [...paths].sort();
 }
@@ -247,8 +251,9 @@ export function serializeCmsFields(fields: DrupalFieldMap): string {
 export function resolveProposedState(
   current: DrupalRawNode,
   proposed: DrupalRawNode,
+  additionalPaths: readonly string[] = [],
 ): { paths: string[]; currentState: DrupalFieldMap; proposedState: DrupalFieldMap; changedPaths: string[] } {
-  const paths = resolveReviewablePaths(current, proposed);
+  const paths = resolveReviewablePaths(current, proposed, additionalPaths);
   const currentState = projectNodeFields(current, paths);
   const proposedState: DrupalFieldMap = { ...currentState };
   const changedPaths: string[] = [];
@@ -326,13 +331,19 @@ export function buildStagedWriteCapture(input: {
   changedPaths: readonly string[];
   capturedAt: string;
   connectorId?: string;
+  /** Additional remote identity/revision/configuration/structured-content
+   * binding, obtained from the backend preimage rather than caller authority.
+   * An omitted binding preserves the generic write's existing CAS bytes. */
+  remoteRevisionBinding?: string;
   /** The staged-write seam this capture belongs to. */
   effect?: StagedWriteEffect;
 }): CmsReviewCaptureInput {
   const proposedSerialization = serializeCmsFields(input.proposedState);
   const currentSerialization = serializeCmsFields(input.currentState);
   const cmsResourceId = String(input.nodeId);
-  const baseRemoteRevisionRef = sha256Hex(currentSerialization);
+  const baseRemoteRevisionRef = input.remoteRevisionBinding === undefined
+    ? sha256Hex(currentSerialization)
+    : sha256Hex(stableStringify({ fields: input.currentState, remoteRevisionBinding: input.remoteRevisionBinding }));
   const operationId = deriveCmsOperationId({
     instanceId: input.instanceId,
     resourceType: input.resourceType,
@@ -440,6 +451,11 @@ export async function evaluateStagedNodeWrite(args: {
   fetchCurrent: () => Promise<DrupalRawNode | null>;
   /** Which staged-write seam is calling (defaults to the content update). */
   effect?: StagedWriteEffect;
+  /** Exact backend preimage context that one approval must not cross. */
+  remoteRevisionBinding?: string;
+  /** Complete readable backend content paths, including canonical fields
+   * outside core names and field_* prefixes. System metadata stays excluded. */
+  additionalReviewPaths?: readonly string[];
   /** Injectable clock for deterministic tests. */
   now?: () => Date;
 }): Promise<StagedNodeWriteDecision> {
@@ -482,7 +498,7 @@ export async function evaluateStagedNodeWrite(args: {
     };
   }
 
-  const { currentState, proposedState, changedPaths } = resolveProposedState(current, args.proposed);
+  const { currentState, proposedState, changedPaths } = resolveProposedState(current, args.proposed, args.additionalReviewPaths);
   // Nothing the review reasons over actually changes → let the write proceed (it
   // will no-op or the writer's own guard rejects it) — no empty gate.
   if (changedPaths.length === 0) return { action: "pass" };
@@ -497,6 +513,7 @@ export async function evaluateStagedNodeWrite(args: {
     changedPaths,
     capturedAt: (args.now ? args.now() : new Date()).toISOString(),
     effect: args.effect ?? "update",
+    ...(args.remoteRevisionBinding === undefined ? {} : { remoteRevisionBinding: args.remoteRevisionBinding }),
     ...(args.connectorId ? { connectorId: args.connectorId } : {}),
   });
 

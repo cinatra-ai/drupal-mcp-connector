@@ -126,8 +126,10 @@ describe("cinatra#409 — per-user write authorization in the Drupal MCP write h
         mode: "agentic",
       });
       if (primitive === "drupal_node_create_draft_revision") {
-        await expect(invoke()).rejects.toThrow(/moderation/);
-        expect(vi.mocked(callDrupalMcp).mock.calls.every((call) => !["mcp_create_content", "mcp_update_content"].includes(call[1]))).toBe(true);
+        // Authorization does not turn this actually unpublished fixture into
+        // authority for the protected published-node primitive.
+        await expect(invoke()).rejects.toThrow(/actual published node identity/);
+        expect(vi.mocked(callDrupalMcp).mock.calls.every((call) => !["cinatra_write_protected_draft", "mcp_create_content", "mcp_update_content"].includes(call[1]))).toBe(true);
       } else {
         await invoke();
         expect(vi.mocked(callDrupalMcp).mock.calls.some((call) => call[1] === (primitive === "drupal_node_update" ? "mcp_update_content" : "mcp_publish_content"))).toBe(true);
