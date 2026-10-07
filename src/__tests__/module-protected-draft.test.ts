@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { prepareModuleDraft, verifyModuleRevision, structureModuleUpdates, moduleRevisionReviewNode } from "../integration/module-protected-draft";
+import { prepareModuleDraft, verifyModuleRevision, structureModuleUpdates } from "../integration/module-protected-draft";
 const envelope = (result: unknown) => ({ contract: "cinatra.protected-draft/v1", result });
 const fields = { title: [{ value: "Live" }], body: [{ value: "Live body", format: "basic_html", summary: "Keep summary" }] };
 const before = { node_id: 7, uuid: "uuid-7", language: "de", default_revision_id: 10, latest_revision_id: 10, is_default_revision: true, is_published: true, moderated: true, canonical_moderation_field: true, workflow_fingerprint: "a".repeat(64), preimage_fingerprint: "c".repeat(64), draft_states: { working: { published: false, default_revision: false } }, allowed_draft_states: ["working"], fields };
@@ -42,7 +42,6 @@ describe("existing-module protected draft contract", () => {
   const plan = prepareModuleDraft(envelope(before), expected);
   const result = verifyModuleRevision(envelope(saved), plan, expected, 11);
   expect(result.fields.body[0]).toEqual({ value: "Stored body", format: "basic_html", summary: "Keep summary" });
-  expect(moduleRevisionReviewNode(result)).toMatchObject({ nid: 7, status: false, title: "Stored", body: "Stored body", summary: "Keep summary" });
  });
  it.each([
   ["node_id", 8], ["uuid", "wrong"], ["language", "en"], ["revision_id", 12],

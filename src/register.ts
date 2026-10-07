@@ -27,22 +27,15 @@ import type {
   ExtensionHostContext,
   HostDrupalMcpService,
   NangoSystemSurface,
-  ObjectsProvider,
 } from "@cinatra-ai/sdk-extensions";
 import {
   registerDrupalConnector,
   type DrupalConnectorDeps,
-  type CmsReviewSeam,
 } from "./deps";
 import {
   buildDrupalInstanceClient,
   type DrupalConnectionGateSlice,
 } from "./lib/drupal-instances";
-import {
-  buildDrupalPointerActor,
-  writeDrupalNodePointerWith,
-  type DrupalNodePointerState,
-} from "./integration/pointer-writer-core";
 
 const PACKAGE_NAME = "@cinatra-ai/drupal-mcp-connector";
 
@@ -104,43 +97,6 @@ function hostService<T>(ctx: ExtensionHostContext, capability: string): T {
     );
   }
   return provider.impl as T;
-}
-
-/** OPTIONAL host-service resolution — returns null when the capability is not
- * registered (a pre-S5 / standalone host) instead of failing loud. Used for the
- * S7 CMS-review seam, whose absence must degrade to fence-OFF byte-identity. */
-function hostServiceOptional<T>(ctx: ExtensionHostContext, capability: string): T | null {
-  const provider = ctx.capabilities.resolveProviders(capability)[0];
-  return (provider?.impl as T | undefined) ?? null;
-}
-
-/**
- * Build the S7 CMS content-review seam (cinatra#2045). Every member resolves the
- * `@cinatra-ai/host:cms-review` capability LAZILY at call time (probe-safe, no
- * resolution at construction). `isReviewActive()` degrades to `false` when the
- * host does not publish the capability (a pre-S5 / standalone host) → the staged
- * content-write path stays byte-identical (fence OFF). The write-driving members
- * fail LOUD if the capability is absent while the fence read active — an
- * incoherent state the trigger never reaches, guarded defensively.
- */
-function buildCmsReviewSeam(ctx: ExtensionHostContext): CmsReviewSeam {
-  const optional = () => hostServiceOptional<CmsReviewSeam>(ctx, "@cinatra-ai/host:cms-review");
-  const required = (): CmsReviewSeam => {
-    const svc = optional();
-    if (!svc) {
-      throw new Error(
-        `${PACKAGE_NAME}: host service "@cinatra-ai/host:cms-review" is not registered, ` +
-          "but the review fence read active — the host S5 wiring must publish it.",
-      );
-    }
-    return svc;
-  };
-  return {
-    isReviewActive: () => optional()?.isReviewActive() ?? false,
-    captureStagedWrite: (input) => required().captureStagedWrite(input),
-    resolveDisposition: (input) => required().resolveDisposition(input),
-    recordApplyVerification: (input) => required().recordApplyVerification(input),
-  };
 }
 
 /** The connector-authored nango-system surface (registered by the nango
@@ -213,12 +169,6 @@ function buildHostBoundDeps(ctx: ExtensionHostContext): DrupalConnectorDeps {
     // unguarded), the same as a real deny.
     requireInstanceWriteAuthority: async (input) =>
       writeAuthority().selectForConnector("drupal").requireWrite(input),
-    // cinatra#2045 S7 — the CMS content-review seam. Always constructed (its
-    // members resolve the host capability lazily); `isReviewActive()` degrades to
-    // false when the host does not publish `@cinatra-ai/host:cms-review`, so a
-    // pre-S5 host keeps byte-identical write behavior. Constructing does no
-    // resolution and no I/O (probe-safe).
-    cmsReview: buildCmsReviewSeam(ctx),
   };
 }
 
@@ -340,54 +290,6 @@ function buildDrupalInstanceAdminProvider(ctx: ExtensionHostContext): DrupalInst
   };
 }
 
-// --- Drupal external-pointer registration (cinatra#1465, epic #1448) ---------
-// The connector's half of the `drupal:node` pointer lifecycle: it WRITES pointer
-// rows for the HOST-registered `@cinatra-ai/drupal:node` type
-// (packages/objects/.../register-types.ts, #1815) through the host objects
-// surface. The TRIGGERS — the node-published webhook sync and the periodic
-// linked→stale→dangling verification sweep — resolve the `drupal-pointer-writer`
-// capability and supply the probe-derived reference state + the org/user the
-// pointer actor is minted from (the twenty-pointer-writer precedent: the
-// connector ships the writer, the host wires the caller). Resolving the objects
-// provider does NO I/O at registration; the impl fails loud at WRITE time if the
-// host never wired the objects surface (an old host), so a pointer is never
-// written unguarded.
-
-/** The host objects-integration service shape (structural mirror — the connector
- * compiles against any host SDK that meets it; the host binds the real
- * `objectTypeRegistry` / `objects_save` surface at boot). */
-type HostObjectsIntegrationShape = { getObjectsProvider(): ObjectsProvider | null };
-
-/** Resolve the host objects provider, or null when the host never published the
- * objects-integration service. */
-function hostObjectsProvider(ctx: ExtensionHostContext): ObjectsProvider | null {
-  const provider = ctx.capabilities.resolveProviders("@cinatra-ai/host:objects-integration")[0];
-  return (provider?.impl as HostObjectsIntegrationShape | undefined)?.getObjectsProvider() ?? null;
-}
-
-/** The `drupal-pointer-writer` capability payload: a node identity + its
- * probe-derived reference state + the org/user the pointer actor is minted from. */
-export type DrupalPointerWriteRequest = {
-  /** Connected-site (instance) id — the Drupal node id is site-scoped. */
-  instanceId: string;
-  /** Drupal node id (unique within the site). */
-  nodeId: number | string;
-  /** Absolute http(s) URL that opens the node in Drupal. */
-  url: string;
-  /** Probe-derived reference state (defaults `linked`). */
-  state?: DrupalNodePointerState;
-  title?: string;
-  excerpt?: string;
-  /** Upstream version (Drupal node `changed`) for the next probe's diff. */
-  remoteVersion?: string;
-  /** ISO timestamp of the sync that materialized/verified the pointer. */
-  verifiedAt?: string;
-  /** The org the pointer row is scoped to (REQUIRED — objects_save rejects a null org). */
-  orgId: string;
-  /** The user, when the trigger is user-attributed. */
-  userId?: string | null;
-};
-
 export function register(ctx: ExtensionHostContext): void {
   // Transport-DI inversion: bind the host deps slot. Always-bind (the
   // bind-if-absent skew guard was swept once every host this connector can
@@ -418,29 +320,5 @@ export function register(ctx: ExtensionHostContext): void {
   ctx.capabilities.registerProvider("@cinatra-ai/host:drupal-mcp", {
     packageName: PACKAGE_NAME,
     impl: buildDrupalInstanceAdminProvider(ctx),
-  });
-
-  // cinatra#1465 — the connector-owned `drupal:node` pointer writer. The host
-  // sync/webhook trigger resolves this capability and supplies the node identity
-  // + probe-derived reference state + org/user; the impl mints the pointer actor
-  // and upserts the pointer row (idempotent by instance + node id) through the
-  // host objects surface. Building the impl does NO host-service resolution and
-  // NO I/O (probe-safe) — the objects provider resolves lazily at write time.
-  ctx.capabilities.registerProvider("drupal-pointer-writer", {
-    packageName: PACKAGE_NAME,
-    impl: {
-      writePointer: async (request: DrupalPointerWriteRequest) => {
-        const provider = hostObjectsProvider(ctx);
-        if (!provider) {
-          throw new Error(`${PACKAGE_NAME}: host objects surface is not wired`);
-        }
-        const { orgId, userId, ...pointer } = request;
-        return writeDrupalNodePointerWith(
-          provider,
-          pointer,
-          buildDrupalPointerActor({ orgId, userId: userId ?? null }),
-        );
-      },
-    },
   });
 }

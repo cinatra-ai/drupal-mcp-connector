@@ -9,8 +9,8 @@ import { callDrupalMcp } from "../lib/drupal-mcp-client";
 import { nodePublishedStatus } from "../integration/protected-draft";
 import {
   MODULE_READ_REVISION, MODULE_WRITE_DRAFT, prepareModuleDraft,
-  structureModuleUpdates, verifyModuleRevision, moduleRevisionReviewNode,
-  reportedModuleRevisionId,
+  structureModuleUpdates, verifyModuleRevision,
+  reportedModuleRevisionId, stableStringify, DRUPAL_SYSTEM_FIELD_PATHS,
   type ModuleDraftIdentity, type ModuleDraftPlan,
 } from "../integration/module-protected-draft";
 // Host-shared runtime surfaces (pagination + A2A dispatch + the instance-admin
@@ -24,15 +24,6 @@ import type {
   WidgetActorContext,
   WidgetActorOverride,
 } from "../deps";
-import {
-  evaluateStagedNodeWrite,
-  projectNodeFields,
-  stableStringify,
-  DRUPAL_SYSTEM_FIELD_PATHS,
-  DRUPAL_STATUS_PUBLISHED,
-  type DrupalRawNode,
-  type StagedNodeWriteDecision,
-} from "../integration/cms-review-trigger";
 
 // READ-BOUNDARY redaction. A read/list primitive must NEVER emit the Nango
 // credential binding. This projection drops `nangoConnectionId` +
@@ -312,58 +303,23 @@ async function readNodeViaMcp(
 }
 
 // ---------------------------------------------------------------------------
-// S7 review-before-publish plumbing (cinatra#2045, epic #2037).
-//
-// The trigger LEAF (`../integration/cms-review-trigger`) owns the pure decision;
-// these two helpers are the only I/O the seam needs from the handler layer:
-// the review-grade current-node read, and the INDEPENDENT post-apply re-read that
-// feeds the read-back verifier.
+// The current-node read of the write guards.
 // ---------------------------------------------------------------------------
 
-/** Review-grade current-node read. FULL-FIELD ONLY (`mcp_jsonapi_list_entities`)
- * — never the `mcp_tools_get_recent_content` summary fallback `drupal_node_get`
- * degrades to, because a summary row carries NO `body`: capturing it as the review
- * base would review a body the reviewer never saw and make every apply read as
- * drift. Returns null on absence OR unavailability so the trigger fails closed. */
-async function readNodeForReview(
+/** Full-field current-node read (`mcp_jsonapi_list_entities`) for the write
+ * guards: the update's status guard and the protected draft's identity read.
+ * Never the `mcp_tools_get_recent_content` summary fallback `drupal_node_get`
+ * degrades to. Returns null on absence OR unavailability; each caller then
+ * refuses its write (fail-closed). */
+async function readCurrentNode(
   instance: DrupalMcpInstance,
   nid: number,
-): Promise<DrupalRawNode | null> {
+): Promise<Record<string, unknown> | null> {
   try {
     return await readNodeViaMcp(instance, nid);
   } catch {
     return null;
   }
-}
-
-/**
- * Record the post-apply read-back verification for an APPROVED, applied staged
- * write. Generic writes use a fresh default-node MCP read; a protected write
- * supplies its fresh exact-revision node. Neither route verifies a request echo
- * or substitutes the published default for a non-default draft.
- */
-async function recordApplyReadback(
-  instance: DrupalMcpInstance,
-  nid: number,
-  review: Extract<StagedNodeWriteDecision, { action: "apply" }>,
-  exactRevisionNode?: DrupalRawNode,
-): Promise<Record<string, unknown>> {
-  const seam = getDrupalDeps().cmsReview;
-  if (!seam) return { operationId: review.operationId, ok: false, code: "seam-unbound" };
-  const postApply = exactRevisionNode ?? await readNodeForReview(instance, nid);
-  if (!postApply) {
-    return { operationId: review.operationId, ok: false, code: "post-apply-read-unavailable" };
-  }
-  const readback = await seam.recordApplyVerification({
-    operationId: review.operationId,
-    gateId: review.gate.gateId,
-    runId: review.gate.runId,
-    // Project EXACTLY the key set the snapshot stored — the verdict compares the
-    // approved proposal to this map path-by-path, so a wider/narrower projection
-    // would manufacture drift.
-    postApplyFields: projectNodeFields(postApply, review.snapshotPaths),
-  });
-  return { operationId: review.operationId, ...readback };
 }
 
 // ---------------------------------------------------------------------------
@@ -474,7 +430,7 @@ export function createDrupalPrimitiveHandlers() {
 
       // The default node is the only target generic update can address. Never
       // interpret an earlier draft call or caller status as revision authority.
-      const current = await readNodeForReview(instance, nid);
+      const current = await readCurrentNode(instance, nid);
       const published = nodePublishedStatus(current?.status);
       if (!current || current.nid !== nid || current.id !== String(nid) || published === null) {
         throw new Error("Cannot establish current node status (read unavailable or unsupported); refusing a content update.");
@@ -483,38 +439,7 @@ export function createDrupalPrimitiveHandlers() {
         throw new Error("Published nodes require a protected draft edit; generic update cannot target that revision.");
       }
 
-      // cinatra#2045 S7 — review-before-publish TRIGGER at the staged content-write
-      // seam. When the host review fence is ON, the PROPOSED node state is captured
-      // as an immutable review target and the effect is HELD before it can reach
-      // Drupal; only an approved gate releases the apply. FENCE-OFF / no seam bound
-      // → `{action:"pass"}` with no capture; the mandatory status guard still reads.
-      // The unpublished-node update payload remains unchanged. Placed AFTER the empty-field sanitation so the
-      // reviewed proposal is exactly the field map the write would send.
-      const review = await evaluateStagedNodeWrite({
-        seam: getDrupalDeps().cmsReview,
-        instanceId: input.instanceId,
-        siteUrl: instance.siteUrl,
-        nodeId: nid,
-        proposed: safeFields,
-        fetchCurrent: async () => current,
-      });
-      // HELD: the effect is held pending review — the write does NOT reach Drupal.
-      if (review.action === "hold") return review.pending;
-      // REJECTED (or a fail-closed refusal): a tombstoned effect never writes.
-      if (review.action === "reject") {
-        throw new Error(`drupal_node_update: ${review.reason}`);
-      }
-
-      // PASS (fence off / org-ungated / nothing to review) or APPLY (an approved
-      // gate released the effect). Either way the write proceeds, unchanged.
-      const applied = await callDrupalMcp(instance, TOOL.UPDATE, {
-        nid: String(nid),
-        updates: safeFields,
-      });
-      if (review.action === "apply") {
-        return { applied, review: await recordApplyReadback(instance, nid, review) };
-      }
-      return applied;
+      return callDrupalMcp(instance, TOOL.UPDATE, { nid: String(nid), updates: safeFields });
     },
 
     drupal_node_create_draft_revision: async (request: ExtensionPrimitiveRequest<unknown>) => {
@@ -527,7 +452,7 @@ export function createDrupalPrimitiveHandlers() {
       if (!Number.isSafeInteger(nid) || Object.keys(fields).some((name) => DRUPAL_SYSTEM_FIELD_PATHS.includes(name))) {
         throw new Error("Protected draft unavailable: a safe node identity and reviewable content fields are required.");
       }
-      const current = await readNodeForReview(instance, nid);
+      const current = await readCurrentNode(instance, nid);
       if (!current || current.nid !== nid || current.id !== String(nid)
         || nodePublishedStatus(current.status) !== true || typeof current.uuid !== "string" || !current.uuid) {
         throw new Error("Protected draft unavailable: the actual published node identity could not be read.");
@@ -571,29 +496,6 @@ export function createDrupalPrimitiveHandlers() {
         }
       }
       const structuredFields = Object.keys(fields).filter((name) => fields[name] !== null && typeof fields[name] === "object");
-      const reviewBefore = { ...moduleRevisionReviewNode({ ...plan.preimage, is_published: true }, structuredFields), bundle: current.bundle };
-      const proposedNode = moduleRevisionReviewNode({ ...plan.preimage, fields: { ...plan.preimage.fields, ...updates }, is_published: false }, structuredFields);
-      const proposed: DrupalRawNode = Object.fromEntries(Object.keys(updates).map((name) => [name, proposedNode[name]]));
-      if (Object.hasOwn(updates, "body")) proposed.summary = proposedNode.summary;
-      proposed.status = false;
-      // The module's stored preimage, not the default JSONAPI's flattened body,
-      // supplies the review/CAS base. Publication state is proposed intent only.
-      const review = await evaluateStagedNodeWrite({
-        seam: getDrupalDeps().cmsReview,
-        instanceId: input.instanceId, siteUrl: instance.siteUrl, nodeId: nid,
-        proposed, fetchCurrent: async () => reviewBefore,
-        additionalReviewPaths: fullIdentity.fields,
-        remoteRevisionBinding: stableStringify({
-          node_id: nid, uuid: expected.uuid, language,
-          default_revision_id: plan.preimage.default_revision_id,
-          latest_revision_id: plan.preimage.latest_revision_id,
-          workflow_fingerprint: plan.preimage.workflow_fingerprint,
-          preimage_fingerprint: plan.preimage.preimage_fingerprint,
-          draft_state: plan.state, before: plan.preimage.fields, updates,
-        }),
-      });
-      if (review.action === "hold") return review.pending;
-      if (review.action === "reject") throw new Error(`Protected draft refused: ${review.reason}`);
       // From dispatch onward a transport failure cannot prove zero writes. The
       // backend binds actual revision/configuration and owns the atomic save.
       let returnedRevisionId: number | undefined;
@@ -627,14 +529,10 @@ export function createDrupalPrimitiveHandlers() {
             }
           }
         }
-        const verification = review.action === "apply"
-          ? await recordApplyReadback(instance, nid, review, moduleRevisionReviewNode(stored, structuredFields)) : undefined;
-        if (verification && verification.ok !== true) throw new Error("The CMS apply verification did not pass.");
         return {
           nodeId: input.nodeId, revision_id: stored.revision_id, status: "draft", applied: true,
           fields: stored.fields,
           pendingDraft: { nodeId: input.nodeId, revisionId: stored.revision_id, language, beforeFields: plan.preimage.fields, fields: stored.fields },
-          ...(verification ? { review: verification } : {}),
         };
       } catch {
         throw new Error("Protected draft verification failed after writer dispatch. A draft may have been saved; inspection required before retrying or claiming success. "
@@ -678,37 +576,7 @@ export function createDrupalPrimitiveHandlers() {
         throw new Error(`Invalid nodeId: "${input.nodeId}" is not a positive integer`);
       }
 
-      // cinatra#2045 S7 — the SAME review trigger at the PUBLISH seam. This is the
-      // one place Drupal genuinely diverges from the WordPress sibling: WordPress
-      // publishes through `wordpress_post_update` (`status` is just another field
-      // in the reviewed proposal), while Drupal's publish effect is its own
-      // primitive. Without the trigger here, "no remote mutation of published
-      // content before approval" (the issue AC) would have a hole the WordPress
-      // connector does not have — an agent could stage content for review and then
-      // make it externally visible with an unreviewed publish call. The proposal is
-      // the status transition itself; the scope manifest is `{paths:["status"]}`.
-      const review = await evaluateStagedNodeWrite({
-        seam: getDrupalDeps().cmsReview,
-        instanceId: input.instanceId,
-        siteUrl: instance.siteUrl,
-        nodeId: nid,
-        proposed: { status: DRUPAL_STATUS_PUBLISHED },
-        effect: "publish",
-        fetchCurrent: () => readNodeForReview(instance, nid),
-      });
-      if (review.action === "hold") return review.pending;
-      if (review.action === "reject") {
-        throw new Error(`drupal_node_publish: ${review.reason}`);
-      }
-
-      const applied = await callDrupalMcp(instance, TOOL.PUBLISH, {
-        nid: String(nid),
-        publish: true,
-      });
-      if (review.action === "apply") {
-        return { applied, review: await recordApplyReadback(instance, nid, review) };
-      }
-      return applied;
+      return callDrupalMcp(instance, TOOL.PUBLISH, { nid: String(nid), publish: true });
     },
 
     // A2A blocking dispatch to wayflow-drupal-content-editor.

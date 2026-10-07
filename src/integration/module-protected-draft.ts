@@ -1,4 +1,40 @@
-import { stableStringify, type DrupalRawNode } from "./cms-review-trigger";
+/** Recursive, key-SORTED JSON serialization: the same value with differently
+ * ordered object keys serializes identically, so the preimage, writer and exact
+ * reader comparisons never split on key order. PURE. */
+export function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v)).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
+}
+
+/** Node keys that are IDENTITY or VOLATILE metadata, never editable content: a
+ * protected draft request that names one is refused before any read or write. */
+export const DRUPAL_SYSTEM_FIELD_PATHS: readonly string[] = [
+  "id",
+  "nid",
+  "uuid",
+  "vid",
+  "bundle",
+  "type",
+  "langcode",
+  "default_langcode",
+  "content_translation_source",
+  "content_translation_outdated",
+  "revision_translation_affected",
+  "revision_timestamp",
+  "revision_uid",
+  "revision_log",
+  "revision_default",
+  "changed",
+  "created",
+  "uid",
+  "path",
+  "url_alias",
+  "metatag",
+];
 
 export const PROTECTED_DRAFT_CONTRACT = "cinatra.protected-draft/v1";
 export const MODULE_READ_REVISION = "cinatra_read_protected_revision";
@@ -148,15 +184,4 @@ export function verifyModuleRevision(value: unknown, plan: ModuleDraftPlan, expe
     is_default_revision: false, is_published: false, moderation_state: plan.state,
     fields: storedFields(result.fields, expected.fields),
   };
-}
-
-/** Same projection for review proposal, its preimage and actual stored result. */
-export function moduleRevisionReviewNode(revision: Pick<ModuleStoredRevision, "node_id" | "uuid" | "language" | "fields"> & { is_published: boolean }, structuredFields: readonly string[] = []): DrupalRawNode {
-  const node: DrupalRawNode = { id: String(revision.node_id), nid: revision.node_id, uuid: revision.uuid, langcode: revision.language, status: revision.is_published };
-  for (const [name, items] of Object.entries(revision.fields)) {
-    node[name] = structuredFields.includes(name) ? items : items.length === 0 ? ""
-      : items.length === 1 && Object.hasOwn(items[0], "value") ? items[0].value : items;
-    if (name === "body" && items.length <= 1) node.summary = items[0]?.summary ?? "";
-  }
-  return node;
 }

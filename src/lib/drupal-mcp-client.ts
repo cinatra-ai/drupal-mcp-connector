@@ -110,10 +110,11 @@ export const DRUPAL_MCP_VERSION_NEGOTIATION: VersionNegotiationOptions = { mode:
 // Every consumer of a `callDrupalMcp` rejection was audited before the package
 // changed, because the fail-open direction here is a content-write gate:
 //
-//   - `handlers.ts` `readNodeForReview` — bare `catch {}` -> `null`, and a null
-//     current read is FAIL-CLOSED in `evaluateStagedNodeWrite` (the staged write
-//     is REJECTED, not passed). Class-agnostic; the fail-closed direction is
-//     preserved and is locked by a test in this package.
+//   - `handlers.ts` `readCurrentNode` — bare `catch {}` -> `null`, and a null
+//     current read is FAIL-CLOSED in the update's status guard and in the
+//     protected draft's identity read (the write is REFUSED, not passed).
+//     Class-agnostic; the fail-closed direction is locked by a test in this
+//     package.
 //   - `handlers.ts` `drupal_node_get` — bare `catch {}` around the full-field
 //     MCP read, falling back to the recent-content summary. Class-agnostic.
 //   - `mcp/toolbox.ts` — `err instanceof Error ? err.message : String(err)` for

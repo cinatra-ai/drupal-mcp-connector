@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../lib/drupal-mcp-client", () => ({ callDrupalMcp: vi.fn() }));
 import { callDrupalMcp } from "../lib/drupal-mcp-client";
 import { createDrupalPrimitiveHandlers, nodeCreateDraftSchema } from "../mcp/handlers";
-import { registerDrupalConnector, type CmsReviewSeam } from "../deps";
+import { registerDrupalConnector } from "../deps";
 import { MODULE_READ_REVISION as READER, MODULE_WRITE_DRAFT as WRITER, PROTECTED_DRAFT_CONTRACT, type StoredFieldItems } from "../integration/module-protected-draft";
 const READ = "mcp_jsonapi_list_entities";
 const instance = { id: "site", name: "Site", siteUrl: "https://example.test", nangoConnectionId: "site", providerConfigKey: "drupal", createdAt: "", updatedAt: "" };
@@ -12,7 +12,7 @@ const preimage = { node_id: 7, uuid: "uuid-7", language: "de", default_revision_
 const stored = { node_id: 7, uuid: "uuid-7", language: "de", revision_id: 11, default_revision_id: 10, is_default_revision: false, is_published: false, moderation_state: "working" };
 const envelope = (result: unknown) => ({ contract: PROTECTED_DRAFT_CONTRACT, result });
 const authority = vi.fn(async () => {});
-function deps(cmsReview?: CmsReviewSeam) { registerDrupalConnector({ decodeCursor: () => 0, buildListPage: (items, total) => ({ items, total }), dispatchContentEditor: async () => "{}", buildNangoBearerHeader: async () => ({ Authorization: "Bearer unit" }), listMcpInstances: () => [instance], probeMcp: async () => "registered", resolveMcpServerUrl: (s) => s, isPrivateUrl: () => false, isNangoConfigured: () => true, getApiStatus: async () => ({ instanceCount: 1, instances: [] }), saveInstance: vi.fn(), deleteInstance: vi.fn(), listInstanceStatuses: async () => [], requireInstanceWriteAuthority: authority, cmsReview }); }
+function deps() { registerDrupalConnector({ decodeCursor: () => 0, buildListPage: (items, total) => ({ items, total }), dispatchContentEditor: async () => "{}", buildNangoBearerHeader: async () => ({ Authorization: "Bearer unit" }), listMcpInstances: () => [instance], probeMcp: async () => "registered", resolveMcpServerUrl: (s) => s, isPrivateUrl: () => false, isNangoConfigured: () => true, getApiStatus: async () => ({ instanceCount: 1, instances: [] }), saveInstance: vi.fn(), deleteInstance: vi.fn(), listInstanceStatuses: async () => [], requireInstanceWriteAuthority: authority }); }
 type Overrides = { node?: unknown; preimage?: Record<string, unknown>; second?: Record<string, unknown>; writer?: Record<string, unknown>; reader?: Record<string, unknown>; missingContract?: boolean; readError?: boolean; writeError?: boolean; exactError?: boolean; sourceFields?: StoredFieldItems; storedFields?: StoredFieldItems; exactFields?: StoredFieldItems };
 function route(o: Overrides = {}) { let reads = 0; const source = o.sourceFields ?? before; let saved = structuredClone(source); vi.mocked(callDrupalMcp).mockImplementation(async (_instance, tool, raw) => {
   const args = raw as Record<string, unknown>;
@@ -26,7 +26,6 @@ function route(o: Overrides = {}) { let reads = 0; const source = o.sourceFields
 }); }
 const writes = () => vi.mocked(callDrupalMcp).mock.calls.filter((c) => [WRITER, "mcp_create_content", "mcp_update_content", "mcp_publish_content", "mcp_moderation_set_state"].includes(c[1]));
 const request = (fields: Record<string, unknown> = { title: "Changed" }, language?: string) => ({ input: { instanceId: "site", nodeId: "7", fields, ...(language ? { language } : {}) } }) as never;
-function seam(disposition: "held" | "approved" | "rejected", ok = true): CmsReviewSeam { return { isReviewActive: () => true, captureStagedWrite: vi.fn(async () => ({ artifactId: "a", snapshotRevisionId: "r", snapshotTargetId: "t", operationId: "o", producedEventId: "e" })), resolveDisposition: async () => ({ disposition, gate: { gateId: "g", runId: "run" } }), recordApplyVerification: vi.fn(async () => ({ ok, outcome: ok ? "verified" as const : "drifted" as const })) }; }
 beforeEach(() => { vi.clearAllMocks(); authority.mockResolvedValue(undefined); deps(); route(); });
 describe("module tools protect the complete published-node handler", () => {
   it("supports an explicit translation", () => { expect(nodeCreateDraftSchema.parse({ instanceId: "site", nodeId: "7", language: "de", fields: { title: "Changed" } })).toMatchObject({ language: "de" }); });
@@ -56,10 +55,10 @@ describe("module tools protect the complete published-node handler", () => {
     const actual = { ...before, title: [{ value: "More recent live title" }] }; route({ sourceFields: actual });
     expect(await createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request())).toMatchObject({ pendingDraft: { beforeFields: actual, fields: { title: [{ value: "Changed" }] } } });
   });
-  it("refuses stale earlier requested-field values before review or writer", async () => {
-    const cms = seam("approved"); deps(cms); route({ sourceFields: { ...before, body: [{ value: "Another author's new paragraph", format: "basic_html", summary: "Keep" }] } });
+  it("refuses stale earlier requested-field values before the writer", async () => {
+    route({ sourceFields: { ...before, body: [{ value: "Another author's new paragraph", format: "basic_html", summary: "Keep" }] } });
     await expect(createDrupalPrimitiveHandlers().drupal_node_create_draft_revision({ input: { instanceId: "site", nodeId: "7", fields: { body: "Proposed from old body" }, expectedFields: { body: "Old body" } } } as never)).rejects.toThrow(/changed.*read|read.*changed/i);
-    expect(writes()).toHaveLength(0); expect(cms.captureStagedWrite).not.toHaveBeenCalled();
+    expect(writes()).toHaveLength(0);
   });
   it("accepts matching earlier values as comparison only, then returns actual stored fields", async () => {
     expect(await createDrupalPrimitiveHandlers().drupal_node_create_draft_revision({ input: { instanceId: "site", nodeId: "7", fields: { title: "Changed" }, expectedFields: { title: "Old" } } } as never)).toMatchObject({ pendingDraft: { beforeFields: { title: before.title } } });
@@ -69,42 +68,6 @@ describe("module tools protect the complete published-node handler", () => {
     route({ writer: { fields: {} } });
     await expect(createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request())).rejects.toThrow(/writer returned revision 11.*node 7.*language de/i);
     expect(writes()).toHaveLength(1);
-  });
-  it("includes untouched canonical fields outside core/field_ names in the reviewed snapshot", async () => {
-    const cms = seam("held"); deps(cms); route({ sourceFields: { ...before, sticky: [{ value: false }] } });
-    await createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request());
-    expect(JSON.parse(vi.mocked(cms.captureStagedWrite).mock.calls[0][0].resolved.text ?? "{}").sticky).toBe("false");
-  });
-  it("the same exact binding still releases its own approved operation", async () => {
-    const records = new Map<string, string>(); let approved = false;
-    const cms: CmsReviewSeam = { ...seam("held"), captureStagedWrite: vi.fn(async (input) => {
-      let artifact = records.get(input.operationId); if (!artifact) { artifact = `a${records.size}`; records.set(input.operationId, artifact); }
-      return { artifactId: artifact, snapshotRevisionId: "r", snapshotTargetId: "t", operationId: input.operationId, producedEventId: "e" };
-    }), resolveDisposition: async () => ({ disposition: approved ? "approved" : "held", gate: { gateId: "g", runId: "run" } }) };
-    deps(cms); expect(await createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request())).toMatchObject({ status: "pending_review" });
-    approved = true; route();
-    expect(await createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request())).toMatchObject({ applied: true, review: { ok: true } });
-    expect(records.size).toBe(1); expect(writes()).toHaveLength(1);
-  });
-  it.each<[string, Overrides, string]>([
-    ["translation", { preimage: { language: "fr" } }, "fr"],
-    ["default/latest revision", { preimage: { default_revision_id: 20, latest_revision_id: 20 } }, "de"],
-    ["workflow", { preimage: { workflow_fingerprint: "b".repeat(64) } }, "de"],
-    ["content token", { preimage: { preimage_fingerprint: "d".repeat(64) } }, "de"],
-    ["structured metadata", { sourceFields: { ...before, body: [{ value: "Old body", format: "plain_text", summary: "Keep" }] } }, "de"],
-    ["untouched canonical field", { sourceFields: { ...before, sticky: [{ value: true }] } }, "de"],
-  ])("an approval is not reused across changed %s bindings", async (_name, override, language) => {
-    const records = new Map<string, string>(); const approved = new Set<string>();
-    const cms: CmsReviewSeam = { ...seam("held"),
-      captureStagedWrite: vi.fn(async (input) => { let artifact = records.get(input.operationId); if (!artifact) { artifact = `a${records.size}`; records.set(input.operationId, artifact); } return { artifactId: artifact, snapshotRevisionId: "r", snapshotTargetId: "t", operationId: input.operationId, producedEventId: "e" }; }),
-      resolveDisposition: async ({ artifactId }) => ({ disposition: approved.has(artifactId) ? "approved" : "held", gate: { gateId: "g", runId: "run" } }),
-    };
-    deps(cms); route({ sourceFields: { ...before, sticky: [{ value: false }] } });
-    expect(await createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request())).toMatchObject({ status: "pending_review" });
-    approved.add("a0"); vi.mocked(callDrupalMcp).mockClear();
-    route({ sourceFields: { ...before, sticky: [{ value: false }] }, ...override });
-    expect(await createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request({ title: "Changed" }, language))).toMatchObject({ status: "pending_review" });
-    expect(records.size).toBe(2); expect(writes()).toHaveLength(0);
   });
   it("preserves format and summary for a scalar body edit", async () => { await createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request({ body: "Changed body" })); expect(writes()[0][2]).toMatchObject({ updates: { body: [{ value: "Changed body", format: "basic_html", summary: "Keep" }] } }); });
   it.each([
@@ -117,10 +80,5 @@ describe("module tools protect the complete published-node handler", () => {
   it.each<[string, Overrides]>([
     ["writer old revision", { writer: { revision_id: 10 } }], ["writer live", { writer: { is_published: true } }], ["reader wrong revision", { reader: { revision_id: 12 } }], ["changed default", { reader: { default_revision_id: 11 } }], ["reader default", { reader: { is_default_revision: true } }], ["wrong node", { reader: { node_id: 8 } }], ["wrong UUID", { reader: { uuid: "other" } }], ["wrong language", { reader: { language: "en" } }], ["wrong state", { reader: { moderation_state: "live" } }], ["incomplete fields", { reader: { fields: { title: [{ value: "Changed" }] } } }], ["write uncertainty", { writeError: true }], ["read unavailable", { exactError: true }], ["writer/read disagree", { exactFields: { ...before, title: [{ value: "Other" }] } }], ["unrequested body drift", { storedFields: { body: [{ value: "Other", format: "basic_html", summary: "Keep" }] } }], ["scalar metadata drift", { storedFields: { title: [{ value: "Changed", extra: true }] } }],
   ])("reports %s honestly after writer dispatch", async (_name, o) => { route(o); let message = ""; try { await createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request()); } catch (error) { message = String(error); } expect(message).toMatch(/may have been saved|inspection required/i); expect(message).not.toMatch(/no (Drupal )?content was written|private provider detail/i); expect(writes()).toHaveLength(1); });
-  it("holds reviewed content before writing", async () => { const cms = seam("held"); deps(cms); expect(await createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request())).toMatchObject({ status: "pending_review", applied: false }); const c = vi.mocked(cms.captureStagedWrite).mock.calls[0][0]; expect(c.scopeManifest.paths).toEqual(["status", "title"]); expect(JSON.parse(c.resolved.text ?? "{}")).toMatchObject({ title: "Changed", body: "Old body", summary: "Keep", field_deck: "Deck", status: "unpublished" }); expect(writes()).toHaveLength(0); expect(cms.recordApplyVerification).not.toHaveBeenCalled(); });
-  it("an approved review uses fresh exact revision values, never default JSONAPI readback", async () => { const cms = seam("approved"); deps(cms); expect(await createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request())).toMatchObject({ review: { ok: true } }); expect(vi.mocked(cms.recordApplyVerification).mock.calls[0][0].postApplyFields).toEqual({ title: "Changed", body: "Old body", summary: "Keep", field_deck: "Deck", status: "unpublished" }); expect(vi.mocked(callDrupalMcp).mock.calls.filter((c) => c[1] === READ)).toHaveLength(1); });
-  it("reviews explicit structured metadata symmetrically", async () => { const cms = seam("approved"); deps(cms); const items = [{ value: "New body", format: "plain_text", summary: "New summary" }]; await createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request({ body: items })); const c = JSON.parse(vi.mocked(cms.captureStagedWrite).mock.calls[0][0].resolved.text ?? "{}"); const r = vi.mocked(cms.recordApplyVerification).mock.calls[0][0].postApplyFields; expect(JSON.parse(c.body)).toEqual(items); expect(r.body).toBe(c.body); expect(r.summary).toBe("New summary"); });
-  it("refuses rejected review", async () => { deps(seam("rejected")); await expect(createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request())).rejects.toThrow(/refused/i); expect(writes()).toHaveLength(0); });
-  it("failed apply verification is not success", async () => { deps(seam("approved", false)); await expect(createDrupalPrimitiveHandlers().drupal_node_create_draft_revision(request())).rejects.toThrow(/inspection required/i); expect(writes()).toHaveLength(1); });
   it("keeps generic published refusal and contradictory identity refusal", async () => { await expect(createDrupalPrimitiveHandlers().drupal_node_update(request())).rejects.toThrow(/published.*protected draft/i); route({ node: { ...node, id: 8, status: false } }); await expect(createDrupalPrimitiveHandlers().drupal_node_update(request())).rejects.toThrow(/current.*status/i); expect(writes()).toHaveLength(0); });
 });
