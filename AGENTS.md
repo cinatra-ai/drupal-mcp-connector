@@ -16,7 +16,7 @@ The Cinatra primitive names (what the LLM calls) map to `drupal/mcp_tools` tool 
 | `drupal_instances_list` | — | Reads from DB; returns rows verbatim; credentials live only in the Nango vault and are resolved at call time |
 | `drupal_node_get` | `mcp_tools_get_recent_content` | **No get-by-ID tool exists** — pulls the recent-content list and finds the node by `id` / `nid`; `mcp_tools_search_content` requires ≥3-char queries and does not support nid-specific lookup |
 | `drupal_node_update` | `mcp_update_content` | `nid` sent as a string (PHP `strtolower()` type fix); maps `fields` input → `updates` arg |
-| `drupal_node_create_draft_revision` | `mcp_create_content` | `status: false` creates a draft (not published) |
+| `drupal_node_create_draft_revision` | `cinatra_read_protected_revision` + `cinatra_write_protected_draft` in the existing Cinatra module | SAME nodeId + fields + optional exact language; atomic draft and independent exact-revision readback |
 | `drupal_node_list` | `mcp_tools_get_recent_content` | Returns `{ total, sorted_by, content: [...] }`; the handler unwraps the `content` array |
 | `drupal_node_publish` | `mcp_publish_content` | `nid` sent as a string + `publish: true` |
 | `drupal_content_editor_run` | — | A2A blocking dispatch to `wayflow-drupal-content-editor` (port 3020). Not an `mcp_tools` call |
@@ -25,7 +25,7 @@ Tool names were discovered by inspecting a live Drupal 11 + `drupal/mcp_tools ^1
 
 ## Key implementation invariants
 
-### `nid` must validate as a positive integer, then dispatch as a string
+### Generic MCP tools use string `nid`; Cinatra module tools use integer `nid`
 
 `mcp_update_content` and `mcp_publish_content` both validate the `nodeId` as a positive integer, then re-stringify before dispatch. The Cinatra primitive receives `nodeId` as a string (from JSON); the handler parses it to a number to reject non-numeric input, then sends `String(nid)` over the wire because `drupal/mcp_tools ^1.0` calls PHP `strtolower()` on the `nid` field and rejects non-string types:
 
@@ -36,6 +36,8 @@ if (!Number.isFinite(nid) || nid <= 0) {
 }
 return callDrupalMcp(instance, TOOL.UPDATE, { nid: String(nid), updates: safeFields });
 ```
+
+The Cinatra module reader/writer have integer Tool API inputs: validate a safe positive integer and dispatch integer `nid` on that path. The generic third-party string workaround does not apply to them.
 
 Sending `NaN` (from `parseInt("abc", 10)`) would otherwise serialise as `null` in JSON and produce an opaque error from Drupal — the parseInt step is purely a validation gate; the actual wire value is the string form.
 
@@ -132,7 +134,7 @@ Avoid hard-coding a per-file or total test count here because it drifts as tests
 
 The `drupal_node_update` and `drupal_node_create_draft_revision` handlers receive `fields: z.record(z.string(), z.unknown())`. Because `fields` is a free-form record, Zod cannot apply per-field `min(1)` guards. If an LLM passes `{ body: "" }` for a field it did not intend to change, Drupal would otherwise apply the empty value literally and wipe that field.
 
-**Defence:** Both handlers strip keys whose value is the literal empty string before dispatch:
+**Defence:** Both handlers strip keys whose value is the literal empty string before planning an edit. Generic update additionally reads the actual node status and refuses a published or unknown-status default. Its unpublished write payload remains:
 
 ```typescript
 const safeFields = Object.fromEntries(
@@ -143,7 +145,7 @@ callDrupalMcp(instance, TOOL.UPDATE, { nid: String(nid), updates: safeFields });
 
 The filter uses strict equality on `""`, so `null`, `undefined`, `false`, and `0` pass through unchanged — legitimate clears (e.g. boolean field flags) keep working.
 
-**All-empty throw guard.** After the strip filter, `drupal_node_update` additionally verifies that at least one field remains:
+**All-empty throw guard.** After the strip filter, both handlers verify that at least one field remains:
 
 ```typescript
 if (Object.keys(safeFields).length === 0) {
@@ -153,7 +155,7 @@ if (Object.keys(safeFields).length === 0) {
 
 This prevents the LLM from issuing a no-op MCP call that the agent would otherwise treat as success. Mirrored on the WordPress side as `wordpress_post_update_meta`.
 
-The asymmetric handler `drupal_node_create_draft_revision` does **not** throw on all-empty `safeFields` — title-only drafts are legal; the handler simply omits the `fields` key from the dispatch payload. Do not "consistency-refactor" a throw into the create-draft path.
+The protected draft primitive takes `nodeId`, required `fields`, optional `language` and optional `expectedFields`; a title-only edit is `{fields:{title:"New title"}}`. An omitted language comes only from the actual node read, never a guessed site default. The obsolete new-node shape is rejected. The site must install the supported existing Cinatra Drupal module and deliberately expose its two tools through its maintained MCP profile; missing contract or permissions fail closed. The module binds actual published preimage, workflow, content and revision identifiers, then saves one unpublished non-default revision atomically. When expectedFields is provided it must match actual stored requested fields; stale earlier reads refuse before the write. The connector dispatches integer node identity and structured values, then independently reads the exact returned revision with the full readable field set. Scalar edits preserve stored format/summary. `pendingDraft.beforeFields` is the bound module preimage; `pendingDraft.fields` and `pendingDraft.revisionId` come from the independent saved read, never a request echo or published-default substitute. Verification failure after writer dispatch reports inspection required and any returned revision identifier; it cannot promise zero writes. Keep MCP-only egress and the existing write-authority gate; no generic live update or separate-node fallback.
 
 This is the deepest deterministic chokepoint between the LLM and the Drupal API. The SKILL.md warning ("Never pass an empty string for a field the user did not ask to change…") remains as an outer prescriptive layer; the runtime filter is the inner backstop. Do not remove the SKILL.md warning — defence-in-depth means each layer behaves as if it is the only one.
 

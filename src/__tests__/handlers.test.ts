@@ -49,7 +49,6 @@ function registerHandlersDepsStub() {
 const DRUPAL_NODE_GET_READ_TOOL = "mcp_jsonapi_list_entities";
 const DRUPAL_NODE_GET_FALLBACK_TOOL = "mcp_tools_get_recent_content";
 const DRUPAL_NODE_UPDATE_TOOL = "mcp_update_content";
-const DRUPAL_NODE_CREATE_DRAFT_TOOL = "mcp_create_content";   // status: false for draft
 const DRUPAL_NODE_LIST_TOOL = "mcp_tools_get_recent_content";
 const DRUPAL_NODE_PUBLISH_TOOL = "mcp_publish_content";
 
@@ -395,7 +394,7 @@ describe("createDrupalPrimitiveHandlers", () => {
 
   it("drupal_node_update dispatches to mcp_update_content with nid + updates object intact", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
-    vi.mocked(callDrupalMcp).mockResolvedValue({ ok: true });
+    vi.mocked(callDrupalMcp).mockImplementation(async (_instance, tool) => tool === DRUPAL_NODE_GET_READ_TOOL ? mcpListEnvelope(serializedNode({ status: false })) : { ok: true });
     await (handlers as any).drupal_node_update({
       primitiveName: "drupal_node_update",
       input: { instanceId: "site-1", nodeId: "5", fields: { title: "New", body: "Body" } },
@@ -410,25 +409,17 @@ describe("createDrupalPrimitiveHandlers", () => {
     );
   });
 
-  it("drupal_node_create_draft_revision dispatches to mcp_create_content with status:false", async () => {
+  it("obsolete create-node draft arguments refuse without creating a new node", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
-    vi.mocked(callDrupalMcp).mockResolvedValue({ nid: 10 });
-    await (handlers as any).drupal_node_create_draft_revision({
-      primitiveName: "drupal_node_create_draft_revision",
+    await expect(handlers.drupal_node_create_draft_revision({
       input: { instanceId: "site-1", nodeBundle: "article", title: "Draft" },
-      actor: { actorType: "model", source: "agent" },
-      mode: "agentic",
-    });
-    expect(callDrupalMcp).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "site-1" }),
-      DRUPAL_NODE_CREATE_DRAFT_TOOL,
-      expect.objectContaining({ status: false }),
-    );
+    } as never)).rejects.toThrow();
+    expect(callDrupalMcp).not.toHaveBeenCalled();
   });
 
   it("drupal_node_update strips empty-string field values before dispatch", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
-    vi.mocked(callDrupalMcp).mockResolvedValue({ ok: true });
+    vi.mocked(callDrupalMcp).mockImplementation(async (_instance, tool) => tool === DRUPAL_NODE_GET_READ_TOOL ? mcpListEnvelope(serializedNode({ status: false })) : { ok: true });
 
     await (handlers as any).drupal_node_update({
       primitiveName: "drupal_node_update",
@@ -443,7 +434,7 @@ describe("createDrupalPrimitiveHandlers", () => {
       mode: "agentic",
     });
 
-    const [, , args] = vi.mocked(callDrupalMcp).mock.calls[0];
+    const [, , args] = vi.mocked(callDrupalMcp).mock.calls.find((call) => call[1] === DRUPAL_NODE_UPDATE_TOOL)!;
     expect(args).toEqual(
       expect.objectContaining({
         nid: "5",                              // String(nid), per existing handler
@@ -455,25 +446,12 @@ describe("createDrupalPrimitiveHandlers", () => {
     expect((args as any).updates).not.toHaveProperty("excerpt");
   });
 
-  it("drupal_node_create_draft_revision strips empty-string field values before dispatch", async () => {
+  it("all empty draft fields refuse without creating content", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
-    vi.mocked(callDrupalMcp).mockResolvedValue({ nid: 10 });
-
-    await (handlers as any).drupal_node_create_draft_revision({
-      primitiveName: "drupal_node_create_draft_revision",
-      input: {
-        instanceId: "site-1",
-        nodeBundle: "article",
-        title: "Draft",
-        fields: { body: "", summary: "Real summary" },
-      },
-      actor: { actorType: "model", source: "agent" },
-      mode: "agentic",
-    });
-
-    const [, , args] = vi.mocked(callDrupalMcp).mock.calls[0];
-    expect((args as any).fields).not.toHaveProperty("body");
-    expect((args as any).fields).toHaveProperty("summary", "Real summary");
+    await expect(handlers.drupal_node_create_draft_revision({
+      input: { instanceId: "site-1", nodeId: "5", fields: { body: "" } },
+    } as never)).rejects.toThrow(/No changed fields/);
+    expect(callDrupalMcp).not.toHaveBeenCalled();
   });
 
   // The handler comment documents the invariant: only literal "" is dropped;
@@ -483,7 +461,7 @@ describe("createDrupalPrimitiveHandlers", () => {
   // semantics with no failing test.
   it("drupal_node_update preserves null/false/0 — only \"\" is filtered", async () => {
     listMcpInstancesMock.mockReturnValue([inst({ id: "site-1" })]);
-    vi.mocked(callDrupalMcp).mockResolvedValue({ ok: true });
+    vi.mocked(callDrupalMcp).mockImplementation(async (_instance, tool) => tool === DRUPAL_NODE_GET_READ_TOOL ? mcpListEnvelope(serializedNode({ status: false })) : { ok: true });
 
     await (handlers as any).drupal_node_update({
       primitiveName: "drupal_node_update",
@@ -496,7 +474,7 @@ describe("createDrupalPrimitiveHandlers", () => {
       mode: "agentic",
     });
 
-    const [, , args] = vi.mocked(callDrupalMcp).mock.calls[0];
+    const [, , args] = vi.mocked(callDrupalMcp).mock.calls.find((call) => call[1] === DRUPAL_NODE_UPDATE_TOOL)!;
     // Pin the full updates shape — only `body: ""` should be dropped.
     expect((args as any).updates).toEqual({
       title: "T",

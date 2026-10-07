@@ -91,12 +91,12 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
   },
   drupal_node_update: {
     description:
-      "Update a Drupal node fields. The nodeId is converted to a numeric nid. Caller must call drupal_node_create_draft_revision first if the node is published.",
+      "Update fields on an existing unpublished Drupal node after reading its actual status. Refuses published or unknown-status nodes: generic update cannot target a protected draft revision.",
     inputSchema: nodeUpdateSchema,
   },
   drupal_node_create_draft_revision: {
     description:
-      "Create a new draft content node of a given bundle (type). Uses mcp_create_content with status:false. Call BEFORE drupal_node_update when the node is published.",
+      "Request an atomic protected draft edit of the SAME published node using instanceId, nodeId, fields, optional explicit language and optional expectedFields from an earlier read. Uses the existing Cinatra Drupal module's protected writer and exact-revision reader and returns actual pendingDraft beforeFields and independently stored fields. Refuses stale expected fields, unavailable preimages or unsafe moderation before its writer; failed verification after dispatch requires inspection because a draft may have been saved. Never creates a new node or follows with generic update.",
     inputSchema: nodeCreateDraftSchema,
   },
   drupal_node_list: {
