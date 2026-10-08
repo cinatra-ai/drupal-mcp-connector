@@ -8,14 +8,8 @@ import type { Metadata } from "next";
 import { revalidatePath } from "next/cache";
 
 import Link from "next/link";
-import { Button } from "./components/ui/button";
+import { Button, Input, InputGroup, InputGroupAddon, InputGroupInput, Field, FieldDescription, FieldLabel, Label, Badge, Alert, AlertDescription } from "@cinatra-ai/design-primitives";
 import { LinkIcon } from "lucide-react";
-import { Input } from "./components/ui/input";
-import { InputGroup, InputGroupAddon, InputGroupInput } from "./components/ui/input-group";
-import { Field, FieldDescription, FieldLabel } from "./components/ui/field";
-import { Label } from "./components/ui/label";
-import { Badge } from "./components/ui/badge";
-import { Alert, AlertDescription } from "./components/ui/alert";
 // `ConnectorSetupPage` — the canonical connector setup-page shell
 // (app-connectors.html §II): pins BOTH the header and the content to the
 // single centered Wide column (max-w-3xl · 768px) so their left edges always
