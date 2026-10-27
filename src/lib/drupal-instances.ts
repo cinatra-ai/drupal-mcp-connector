@@ -162,10 +162,14 @@ export type DrupalInstanceStoreDeps = {
 export type DrupalInstanceClient = {
   getDrupalAPISettings(): DrupalAPISettings;
   saveDrupalInstance(input: SaveDrupalInstanceInput): Promise<DrupalInstanceSettings>;
+  /** `orgId`/`runBy`: the complete binding pair the host's dev persist wrapper
+   * adds (drupal-mcp-connector#101); the hook never passes one. */
   persistLocalDevDrupalInstanceUnvalidated(input: {
     id?: string;
     name: string;
     siteUrl: string;
+    orgId?: string;
+    runBy?: string;
   }): Promise<DrupalInstanceSettings>;
   deleteDrupalInstance(id: string): Promise<void>;
   listDrupalInstances(): Promise<DrupalInstanceSettings[]>;
@@ -455,12 +459,20 @@ export function buildDrupalInstanceClient(deps: DrupalInstanceStoreDeps): Drupal
    * ADDITIONALLY refused outside development via the host runtime-mode
    * capability). It must never become a general production affordance.
    *
+   * BINDING (drupal-mcp-connector#101, cinatra#4387): the host's dev persist
+   * wrapper adds the install→org binding (cinatra#274) of the boot's dev owner
+   * to the input — the hook itself never passes one. A COMPLETE `{orgId, runBy}`
+   * pair is written (and re-written on every boot); without a complete pair the
+   * row keeps its existing binding (never half a binding).
+   *
    * SECRET BOUNDARY: writes no credential (none is involved) and logs nothing.
    */
   async function persistLocalDevDrupalInstanceUnvalidated(input: {
     id?: string;
     name: string;
     siteUrl: string;
+    orgId?: string;
+    runBy?: string;
   }): Promise<DrupalInstanceSettings> {
     const siteUrl = trimTrailingSlashesLinear(input.siteUrl.trim());
     const host = (() => {
@@ -489,6 +501,12 @@ export function buildDrupalInstanceClient(deps: DrupalInstanceStoreDeps): Drupal
 
     const now = new Date().toISOString();
     const id = input.id?.trim() || existing?.id || randomUUID();
+    const inputOrgId = typeof input.orgId === "string" ? input.orgId.trim() : "";
+    const inputRunBy = typeof input.runBy === "string" ? input.runBy.trim() : "";
+    const binding =
+      inputOrgId && inputRunBy
+        ? { orgId: inputOrgId, runBy: inputRunBy }
+        : { orgId: existing?.orgId, runBy: existing?.runBy };
     const next: DrupalInstanceSettings = {
       id,
       name: trimmedName,
@@ -501,10 +519,11 @@ export function buildDrupalInstanceClient(deps: DrupalInstanceStoreDeps): Drupal
       // lastValidatedAt intentionally omitted — this row was NOT validated.
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
-      // Preserve any existing multi-tenant install→org binding (cinatra#274).
-      // This local-dev persist has no session, so it never sets a new binding.
-      orgId: existing?.orgId,
-      runBy: existing?.runBy,
+      // The multi-tenant install→org binding (cinatra#274): the complete pair
+      // the host added for the dev owner, else the existing one. This persist
+      // has no session and never resolves a binding itself.
+      orgId: binding.orgId,
+      runBy: binding.runBy,
     };
 
     const remaining = current.instances.filter(

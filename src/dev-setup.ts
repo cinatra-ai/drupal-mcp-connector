@@ -34,12 +34,26 @@ export const LOCAL_DRUPAL = {
 
 const DRUPAL_REMOTE_KEY_LABEL = "cinatra-dev";
 
+/** Input of an instance save from this hook: never an org or user id. */
+type DrupalDevSaveInput = { id?: string; name: string; siteUrl: string; mcpApiKey?: string };
+
+/**
+ * The host's dev-only validated save (cinatra#4387): `saveInstance` with the
+ * install→org binding of the boot's dev owner bound HOST-side. Declared here
+ * structurally (optional) so this hook stays skew-safe against a host whose
+ * SDK predates the member; an older host simply lacks it.
+ */
+type DrupalDevSaveMember = {
+  devSaveInstance?(input: DrupalDevSaveInput): Promise<{ id: string }>;
+};
+
 /** The narrow host-service slice this hook consumes (all resolved at run time). */
 export type DrupalDevSetupDeps = {
   drupal: Pick<
     HostDrupalMcpService,
     "listInstances" | "saveInstance" | "devPersistLocalInstanceUnvalidated" | "devProbeWithBearer" | "devInvalidateProbeCache"
-  >;
+  > &
+    DrupalDevSaveMember;
   widgetAuth: HostDrupalWidgetAuthService;
   nango: Pick<
     NangoSystemSurface,
@@ -105,6 +119,19 @@ export function parseDrupalRemoteKey(out: string): string | null {
     return null;
   }
   return null;
+}
+
+/**
+ * Every instance save of this hook (drupal-mcp-connector#101): through the
+ * host's `devSaveInstance`, which binds the boot's dev owner (org + user) to the
+ * row host-side, so the write-authority gate admits the dev administrator. On
+ * an older host without it, the plain `saveInstance` (no binding, as before).
+ * The hook never reads or passes a user id itself.
+ */
+function saveDevInstance(deps: DrupalDevSetupDeps, input: DrupalDevSaveInput): Promise<{ id: string }> {
+  return typeof deps.drupal.devSaveInstance === "function"
+    ? deps.drupal.devSaveInstance(input)
+    : deps.drupal.saveInstance(input);
 }
 
 /**
@@ -177,7 +204,7 @@ export async function ensureDrupalRemoteKeyReconciled(
       // saveInstance does ensure → import → forceRefresh readback-verify
       // (throws on mismatch) → persist. The readback gate means a bad key
       // never lands in the local row/pointer.
-      await deps.drupal.saveInstance({
+      await saveDevInstance(deps, {
         id: input.instanceId,
         name: input.instanceName,
         siteUrl: input.siteUrl,
@@ -442,7 +469,7 @@ async function autoSetupLocalDrupalBody(
       };
     }
     try {
-      const saved = await deps.drupal.saveInstance({
+      const saved = await saveDevInstance(deps, {
         name: LOCAL_DRUPAL.instanceName,
         siteUrl: LOCAL_DRUPAL.siteUrl,
         mcpApiKey: seedBearer,
@@ -498,7 +525,7 @@ async function autoSetupLocalDrupalBody(
       const minted = mintDrupalRemoteKey(helpers);
       if (minted) {
         try {
-          await deps.drupal.saveInstance({
+          await saveDevInstance(deps, {
             id: instanceId,
             name: existing.name,
             siteUrl: LOCAL_DRUPAL.siteUrl,
@@ -518,6 +545,21 @@ async function autoSetupLocalDrupalBody(
           };
         }
       }
+    }
+  }
+
+  // RE-BIND (drupal-mcp-connector#101): a row wired before the host bound the
+  // dev owner carries no org, and a boot that reuses a working key makes no save
+  // — so the row would stay unbound and every write denied. On every boot that
+  // reused an EXISTING row without saving it, save it once more WITHOUT a key
+  // (name/URL/binding only; no Nango import) through `devSaveInstance`, so the
+  // host binds this boot's dev owner. Only when the host offers the member (an
+  // older host could not bind it). Soft-fails: a fixed note, never the error.
+  if (existing && !reconcile.rotated && typeof deps.drupal.devSaveInstance === "function") {
+    try {
+      await deps.drupal.devSaveInstance({ id: instanceId, name: existing.name, siteUrl: LOCAL_DRUPAL.siteUrl });
+    } catch {
+      deps.log("instance re-bind to the dev owner failed (kept the row; the next boot retries).");
     }
   }
 
