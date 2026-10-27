@@ -39,9 +39,9 @@ type DrupalDevSaveInput = { id?: string; name: string; siteUrl: string; mcpApiKe
 
 /**
  * The host's dev-only validated save (cinatra#4387): `saveInstance` with the
- * install→org binding of the boot's dev owner bound HOST-side. Declared here
- * structurally (optional) so this hook stays skew-safe against a host whose
- * SDK predates the member; an older host simply lacks it.
+ * install→org binding of the boot's dev owner bound HOST-side. The member is
+ * host-local in core (not in the SDK contract), so it is declared here
+ * structurally (optional); an older host simply lacks it.
  */
 type DrupalDevSaveMember = {
   devSaveInstance?(input: DrupalDevSaveInput): Promise<{ id: string }>;
