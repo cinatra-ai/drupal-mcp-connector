@@ -5,11 +5,12 @@
 //
 // The hook runs END TO END over the REAL connector instance client
 // (buildDrupalInstanceClient) on an in-memory connector-config store and a
-// fake Nango vault. The HOST side is a stand-in for core's drupal-mcp dev
-// members after cinatra#4387: `devSaveInstance` and the dev persist wrapper
-// drop any caller org/user and add the boot's dev owner, exactly as
-// register-host-connector-services.ts does; `saveInstance` binds nothing. The
-// hook itself never passes an org or user id (pinned below).
+// fake Nango vault. The HOST side is a stand-in modelled on core's drupal-mcp
+// dev members after cinatra#4387 (whose own tests, in cinatra's
+// host-connector-services-publication.test.ts, pin the real members):
+// `devSaveInstance` and the dev persist wrapper drop any caller org/user and add
+// the boot's dev owner; `saveInstance` binds nothing. The hook itself never
+// passes an org or user id (pinned below).
 //
 // SECRET BOUNDARY: assertions check statuses, ids and equality only.
 
@@ -30,7 +31,14 @@ const STORED = "stored-remote-key-fedcba9876543210";
 
 type Input = Record<string, unknown> & { id?: string; name: string; siteUrl: string; mcpApiKey?: string };
 
-function harness(opts: { nango: boolean; owner?: typeof OWNER | null; hostHasDevSave?: boolean; probe?: string }) {
+function harness(opts: {
+  nango: boolean;
+  owner?: typeof OWNER | null;
+  hostHasDevSave?: boolean;
+  probe?: string;
+  /** The host's key-less devSaveInstance (the re-bind) throws. */
+  rebindThrows?: boolean;
+}) {
   let owner = opts.owner === undefined ? OWNER : opts.owner;
   let nangoOn = opts.nango;
   const store: Record<string, unknown> = {};
@@ -88,6 +96,7 @@ function harness(opts: { nango: boolean; owner?: typeof OWNER | null; hostHasDev
   if (opts.hostHasDevSave !== false) {
     drupal.devSaveInstance = vi.fn(async (input: Input) => {
       hookCalls.push({ member: "devSaveInstance", input });
+      if (opts.rebindThrows && input.mcpApiKey === undefined) throw new Error("host re-bind failed");
       return client.saveDrupalInstance(bind(input) as never);
     });
   }
@@ -172,6 +181,43 @@ describe("dev setup binds the saved Drupal instance to the dev owner (drupal-mcp
     const rebinds = h.hookCalls.filter((c) => c.member === "devSaveInstance");
     expect(rebinds).toHaveLength(1);
     expect(rebinds[0].input.mcpApiKey).toBeUndefined();
+  });
+
+  it("re-bind with Nango on a key that did not reconcile (probe unreachable): the row is still bound, the key kept", async () => {
+    // The binding does not depend on the key's health: a key-less save never
+    // touches Nango, so the row is bound even while the stored key is unconfirmed.
+    const h = harness({ nango: true, probe: "unreachable" });
+    const seeded = await h.client.saveDrupalInstance({
+      name: LOCAL_DRUPAL.instanceName,
+      siteUrl: LOCAL_DRUPAL.siteUrl,
+      mcpApiKey: STORED,
+    });
+    expect(h.row()!.orgId).toBeUndefined();
+    const status = await autoSetupLocalDrupal(h.deps);
+    expect(status).toMatchObject({ status: "already-wired" });
+    expect((status as { detail?: string }).detail).toContain("remote-key unconfirmed");
+    const rebinds = h.hookCalls.filter((c) => c.member === "devSaveInstance");
+    expect(rebinds).toHaveLength(1);
+    expect(rebinds[0].input.mcpApiKey).toBeUndefined();
+    expect(h.vault.get(seeded.id)).toBe(STORED);
+    expect(h.row()).toMatchObject({ id: seeded.id, orgId: OWNER.orgId, runBy: OWNER.runBy });
+  });
+
+  it("a failed re-bind is caught: one fixed log line, the row kept as it was, the boot status and detail unchanged", async () => {
+    const seed = async (h: ReturnType<typeof harness>) =>
+      h.client.saveDrupalInstance({ name: LOCAL_DRUPAL.instanceName, siteUrl: LOCAL_DRUPAL.siteUrl, mcpApiKey: STORED });
+    const ok = harness({ nango: true, probe: "registered", hostHasDevSave: false });
+    await seed(ok);
+    const expected = await autoSetupLocalDrupal(ok.deps);
+    const h = harness({ nango: true, probe: "registered", rebindThrows: true });
+    const seeded = await seed(h);
+    const status = await autoSetupLocalDrupal(h.deps);
+    expect(status).toEqual({ ...expected, detail: (expected as { detail: string }).detail.replace(/instance \S+/, `instance ${seeded.id}`) });
+    expect(status).toMatchObject({ status: "already-wired" });
+    const logs = (h.deps.log as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => c[0]);
+    expect(logs.filter((l) => l === "instance re-bind to the dev owner failed (kept the row; the next boot retries).")).toHaveLength(1);
+    expect(h.row()!.orgId).toBeUndefined();
+    expect(h.vault.get(seeded.id)).toBe(STORED);
   });
 
   it("re-bind without Nango: an already-wired UNBOUND instance is bound on the next boot", async () => {
@@ -269,6 +315,8 @@ describe("persistLocalDevDrupalInstanceUnvalidated binding input (drupal-mcp-con
     expect(none).toMatchObject({ orgId: "o-1", runBy: "u-1" });
     const half = await c.persistLocalDevDrupalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082", orgId: "o-9", runBy: " " });
     expect(half).toMatchObject({ orgId: "o-1", runBy: "u-1" });
+    const otherHalf = await c.persistLocalDevDrupalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082", orgId: " ", runBy: "u-9" });
+    expect(otherHalf).toMatchObject({ orgId: "o-1", runBy: "u-1" });
   });
 
   it("a new row with half a pair has no binding", async () => {
@@ -276,5 +324,8 @@ describe("persistLocalDevDrupalInstanceUnvalidated binding input (drupal-mcp-con
     const row = await c.persistLocalDevDrupalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082", orgId: "o-1" });
     expect(row.orgId).toBeUndefined();
     expect(row.runBy).toBeUndefined();
+    const other = await c.persistLocalDevDrupalInstanceUnvalidated({ name: "m", siteUrl: "http://localhost:8083", runBy: "u-1" });
+    expect(other.orgId).toBeUndefined();
+    expect(other.runBy).toBeUndefined();
   });
 });
