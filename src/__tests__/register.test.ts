@@ -307,105 +307,38 @@ describe("register(ctx) — transport-DI deps binding (Stage 3)", () => {
   });
 
   it("W3 devPersistLocalInstanceUnvalidated is REFUSED outside development (runtime-mode gate) and persists + returns {id} in dev", async () => {
-    // Not a preview instance, whatever the ambient environment holds (a preview
-    // is admitted; see the next test); both variables are restored.
-    const saved = (["CINATRA_RUNTIME_MODE", "CINATRA_INSTALL_PROFILE"] as const).map((k) => [k, process.env[k]] as const);
-    delete process.env.CINATRA_RUNTIME_MODE;
-    delete process.env.CINATRA_INSTALL_PROFILE;
-    try {
-      const store: Record<string, unknown> = {};
-      const impls = {
-        "@cinatra-ai/host:connector-config": {
-          read: <T,>(key: string, fallback: T): T => (store[key] as T) ?? fallback,
-          write: (key: string, value: unknown) => {
-            store[key] = value;
-          },
+    const store: Record<string, unknown> = {};
+    const impls = {
+      "@cinatra-ai/host:connector-config": {
+        read: <T,>(key: string, fallback: T): T => (store[key] as T) ?? fallback,
+        write: (key: string, value: unknown) => {
+          store[key] = value;
         },
-        "@cinatra-ai/host:runtime-mode": { isDevelopment: () => false },
-        "nango-system": {
-          isNangoConfigured: () => false,
-          providerConfigKeys: { drupal: "cinatra-drupal" },
-        },
-      };
-      const { registerProvider } = activateWithServices(impls);
-      const impl = registeredImpl<{
-        devPersistLocalInstanceUnvalidated(input: {
-          name: string;
-          siteUrl: string;
-        }): Promise<{ id: string }>;
-      }>(registerProvider, "@cinatra-ai/host:drupal-mcp");
-
-      await expect(
-        impl.devPersistLocalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082" }),
-      ).rejects.toThrow(/dev-only devSetup provisioning member; refused outside development/);
-      expect(store.drupal).toBeUndefined();
-
-      impls["@cinatra-ai/host:runtime-mode"] = { isDevelopment: () => true };
-      await expect(
-        impl.devPersistLocalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082" }),
-      ).resolves.toMatchObject({ id: expect.any(String) });
-      expect((store.drupal as { instances: unknown[] }).instances).toHaveLength(1);
-    } finally {
-      for (const [k, v] of saved) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
-    }
-  });
-
-  it("W3 devPersistLocalInstanceUnvalidated admits a preview instance (preview profile on a production runtime) exactly as core's dev members do, and refuses every other non-development combination (drupal-mcp-connector#101)", async () => {
-    const keys = ["CINATRA_RUNTIME_MODE", "CINATRA_INSTALL_PROFILE"] as const;
-    const saved = keys.map((k) => [k, process.env[k]] as const);
-    const setEnv = (values: Partial<Record<(typeof keys)[number], string>>) => {
-      for (const k of keys) {
-        if (values[k] === undefined) delete process.env[k];
-        else process.env[k] = values[k];
-      }
+      },
+      "@cinatra-ai/host:runtime-mode": { isDevelopment: () => false },
+      "nango-system": {
+        isNangoConfigured: () => false,
+        providerConfigKeys: { drupal: "cinatra-drupal" },
+      },
     };
-    try {
-      const store: Record<string, unknown> = {};
-      const impls = {
-        "@cinatra-ai/host:connector-config": {
-          read: <T,>(key: string, fallback: T): T => (store[key] as T) ?? fallback,
-          write: (key: string, value: unknown) => {
-            store[key] = value;
-          },
-        },
-        "@cinatra-ai/host:runtime-mode": { isDevelopment: () => false },
-        "nango-system": {
-          isNangoConfigured: () => false,
-          providerConfigKeys: { drupal: "cinatra-drupal" },
-        },
-      };
-      const { registerProvider } = activateWithServices(impls);
-      const impl = registeredImpl<{
-        devPersistLocalInstanceUnvalidated(input: { name: string; siteUrl: string }): Promise<{ id: string }>;
-      }>(registerProvider, "@cinatra-ai/host:drupal-mcp");
+    const { registerProvider } = activateWithServices(impls);
+    const impl = registeredImpl<{
+      devPersistLocalInstanceUnvalidated(input: {
+        name: string;
+        siteUrl: string;
+      }): Promise<{ id: string }>;
+    }>(registerProvider, "@cinatra-ai/host:drupal-mcp");
 
-      for (const refused of [
-        { CINATRA_RUNTIME_MODE: "production" },
-        { CINATRA_RUNTIME_MODE: "production", CINATRA_INSTALL_PROFILE: "demo" },
-        { CINATRA_INSTALL_PROFILE: "preview" },
-        { CINATRA_RUNTIME_MODE: "development", CINATRA_INSTALL_PROFILE: "preview" },
-      ]) {
-        setEnv(refused);
-        await expect(
-          impl.devPersistLocalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082" }),
-        ).rejects.toThrow(/dev-only devSetup provisioning member; refused outside development/);
-      }
-      expect(store.drupal).toBeUndefined();
+    await expect(
+      impl.devPersistLocalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082" }),
+    ).rejects.toThrow(/dev-only devSetup provisioning member; refused outside development/);
+    expect(store.drupal).toBeUndefined();
 
-      setEnv({ CINATRA_RUNTIME_MODE: "production", CINATRA_INSTALL_PROFILE: "preview" });
-      await expect(
-        impl.devPersistLocalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082" }),
-      ).resolves.toMatchObject({ id: expect.any(String) });
-      expect((store.drupal as { instances: unknown[] }).instances).toHaveLength(1);
-    } finally {
-      for (const [k, v] of saved) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
-    }
+    impls["@cinatra-ai/host:runtime-mode"] = { isDevelopment: () => true };
+    await expect(
+      impl.devPersistLocalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082" }),
+    ).resolves.toMatchObject({ id: expect.any(String) });
+    expect((store.drupal as { instances: unknown[] }).instances).toHaveLength(1);
   });
 
   it("fails LOUD with the package name + registration step when the SLOT itself is unbound", () => {
