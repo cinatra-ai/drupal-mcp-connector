@@ -554,12 +554,14 @@ async function autoSetupLocalDrupalBody(
   // reused an EXISTING row without saving it, save it once more WITHOUT a key
   // (name/URL/binding only; no Nango import) through `devSaveInstance`, so the
   // host binds this boot's dev owner. Only when the host offers the member (an
-  // older host could not bind it). Soft-fails: a fixed note, never the error.
+  // older host could not bind it). Soft-fails: a fixed note, never the error,
+  // and the boot status is unchanged. The note claims nothing about the row: a
+  // host that saved the row and then rejected may have bound it.
   if (existing && !reconcile.rotated && typeof deps.drupal.devSaveInstance === "function") {
     try {
       await deps.drupal.devSaveInstance({ id: instanceId, name: existing.name, siteUrl: LOCAL_DRUPAL.siteUrl });
     } catch {
-      deps.log("instance re-bind to the dev owner failed (kept the row; the next boot retries).");
+      deps.log("instance re-bind to the dev owner failed (the row may or may not be bound; the next boot retries).");
     }
   }
 

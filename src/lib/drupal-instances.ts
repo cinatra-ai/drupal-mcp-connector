@@ -71,9 +71,12 @@ export type DrupalInstanceSettings = {
    * Resolved by the host's `resolveContentEditorIdentityForInstance` so a
    * host-initiated content-editor write executes as THIS install's org/user
    * instead of the single-tenant default. Persisted as part of the drupal
-   * connector_config JSON blob — no schema migration. Undefined on rows saved
-   * before this change (pre-binding) and on the session-less local-dev
-   * persist — the resolver then falls back to single-tenant identity.
+   * connector_config JSON blob — no schema migration. The session-less
+   * local-dev persist and a dev-boot save take the pair the HOST adds for the
+   * boot's dev owner (drupal-mcp-connector#101, cinatra#4387); without a
+   * complete pair they keep the row's existing binding. Undefined on rows saved
+   * before this change (pre-binding) and on a dev row no boot with an owner has
+   * saved yet — the resolver then falls back to single-tenant identity.
    */
   orgId?: string;
   runBy?: string;
