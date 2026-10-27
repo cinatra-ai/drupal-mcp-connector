@@ -248,6 +248,18 @@ function buildWidgetAuthProvider(ctx: ExtensionHostContext): DrupalWidgetAuthPro
 /** The host runtime-mode service (`@cinatra-ai/host:runtime-mode`). */
 type HostRuntimeModeShape = { isDevelopment(): boolean };
 
+/**
+ * A preview instance: the `preview` install profile on a production runtime.
+ * This is EXACTLY the predicate core's dev-setup members admit besides
+ * development (`isPreviewInstanceEnv` in cinatra's
+ * register-host-connector-services.ts, cinatra#4098). The host runtime-mode
+ * service answers only `isDevelopment()`, so the same two variables are read
+ * here. Any other combination is not a preview.
+ */
+function isPreviewInstanceEnv(env: Record<string, string | undefined>): boolean {
+  return env.CINATRA_RUNTIME_MODE === "production" && env.CINATRA_INSTALL_PROFILE === "preview";
+}
+
 type DrupalInstanceAdminProvider = Pick<
   HostDrupalMcpService,
   "listInstances" | "getAPIStatus" | "saveInstance" | "deleteInstance" | "devPersistLocalInstanceUnvalidated"
@@ -276,10 +288,15 @@ function buildDrupalInstanceAdminProvider(ctx: ExtensionHostContext): DrupalInst
     // Dev-boot provisioning member (cinatra#976, epic #978 W-D). Resolved ONLY
     // by this connector's own `dev-setup.ts` hook via the strictly dev-gated
     // `dev-auto-setup` shell — defense-in-depth refused outside development
-    // (the same guard + message the host registration carried; the persist
-    // helper itself ALSO enforces loopback-only).
+    // and a preview instance, the same boots core's dev members admit
+    // (drupal-mcp-connector#101: a preview boot without Nango reaches this
+    // persist). The message is the one the host registration carries; the
+    // persist helper itself ALSO enforces loopback-only.
     devPersistLocalInstanceUnvalidated: async (input) => {
-      if (!hostService<HostRuntimeModeShape>(ctx, "@cinatra-ai/host:runtime-mode").isDevelopment()) {
+      if (
+        !hostService<HostRuntimeModeShape>(ctx, "@cinatra-ai/host:runtime-mode").isDevelopment() &&
+        !isPreviewInstanceEnv(process.env)
+      ) {
         throw new Error(
           "drupal-mcp.devPersistLocalInstanceUnvalidated is a dev-only devSetup provisioning member; refused outside development.",
         );

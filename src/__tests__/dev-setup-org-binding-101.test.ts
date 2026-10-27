@@ -40,7 +40,11 @@ function harness(opts: {
   rebindThrows?: boolean;
   /** The host's key-less devSaveInstance saves the row and THEN rejects. */
   rebindRejectsAfterSave?: boolean;
-  /** The host's KEYED devSaveInstance (first wire, rotation, transition) throws. */
+  /**
+   * The host's KEYED devSaveInstance (first wire, rotation, transition) throws
+   * BEFORE it calls the connector's save: nothing is imported or written. (A
+   * rejection after the real save imported the key is not modelled here.)
+   */
   keyedThrows?: boolean;
 }) {
   let owner = opts.owner === undefined ? OWNER : opts.owner;
@@ -250,7 +254,7 @@ describe("dev setup binds the saved Drupal instance to the dev owner (drupal-mcp
     expect(h.vault.get(seeded.id)).toBe(STORED);
   });
 
-  it("a keyed devSaveInstance that rejects on the first wire fails the boot with the fixed reason and never falls back to saveInstance", async () => {
+  it("a keyed devSaveInstance that rejects before saving, on the first wire, fails the boot with the fixed reason and never falls back to saveInstance", async () => {
     const h = harness({ nango: true, keyedThrows: true });
     const status = await autoSetupLocalDrupal(h.deps);
     expect(status).toEqual({ status: "error", reason: "saveDrupalInstance failed (first wire)" });
@@ -258,7 +262,7 @@ describe("dev setup binds the saved Drupal instance to the dev owner (drupal-mcp
     expect(h.row()).toBeUndefined();
   });
 
-  it("a keyed devSaveInstance that rejects on a rotation keeps the stored key, never falls back to saveInstance, and the key-less re-bind still binds the row", async () => {
+  it("a keyed devSaveInstance that rejects before saving, on a rotation, keeps the stored key, never falls back to saveInstance, and the key-less re-bind still binds the row", async () => {
     const h = harness({ nango: true, probe: "auth_error", keyedThrows: true });
     const seeded = await h.client.saveDrupalInstance({ name: LOCAL_DRUPAL.instanceName, siteUrl: LOCAL_DRUPAL.siteUrl, mcpApiKey: STORED });
     const status = await autoSetupLocalDrupal(h.deps);
@@ -271,7 +275,7 @@ describe("dev setup binds the saved Drupal instance to the dev owner (drupal-mcp
     expect(h.row()).toMatchObject({ id: seeded.id, orgId: OWNER.orgId, runBy: OWNER.runBy });
   });
 
-  it("a keyed devSaveInstance that rejects on the local-dev transition imports no key, never falls back to saveInstance, and the key-less re-bind still binds the row", async () => {
+  it("a keyed devSaveInstance that rejects before saving, on the local-dev transition, imports no key, never falls back to saveInstance, and the key-less re-bind still binds the row", async () => {
     const h = harness({ nango: false, owner: null });
     await autoSetupLocalDrupal(h.deps);
     h.setNango(true);
