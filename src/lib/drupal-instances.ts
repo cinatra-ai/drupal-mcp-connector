@@ -71,9 +71,12 @@ export type DrupalInstanceSettings = {
    * Resolved by the host's `resolveContentEditorIdentityForInstance` so a
    * host-initiated content-editor write executes as THIS install's org/user
    * instead of the single-tenant default. Persisted as part of the drupal
-   * connector_config JSON blob — no schema migration. Undefined on rows saved
-   * before this change (pre-binding) and on the session-less local-dev
-   * persist — the resolver then falls back to single-tenant identity.
+   * connector_config JSON blob — no schema migration. The session-less
+   * local-dev persist and a dev-boot save take the pair the HOST adds for the
+   * boot's dev owner (drupal-mcp-connector#101, cinatra#4387); without a
+   * complete pair they keep the row's existing binding. Undefined on rows saved
+   * before this change (pre-binding) and on a dev row no boot with an owner has
+   * saved yet — the resolver then falls back to single-tenant identity.
    */
   orgId?: string;
   runBy?: string;
@@ -162,10 +165,14 @@ export type DrupalInstanceStoreDeps = {
 export type DrupalInstanceClient = {
   getDrupalAPISettings(): DrupalAPISettings;
   saveDrupalInstance(input: SaveDrupalInstanceInput): Promise<DrupalInstanceSettings>;
+  /** `orgId`/`runBy`: the complete binding pair the host's dev persist wrapper
+   * adds (drupal-mcp-connector#101); the hook never passes one. */
   persistLocalDevDrupalInstanceUnvalidated(input: {
     id?: string;
     name: string;
     siteUrl: string;
+    orgId?: string;
+    runBy?: string;
   }): Promise<DrupalInstanceSettings>;
   deleteDrupalInstance(id: string): Promise<void>;
   listDrupalInstances(): Promise<DrupalInstanceSettings[]>;
@@ -183,6 +190,22 @@ function trimTrailingSlashesLinear(input: string): string {
   let end = input.length;
   while (end > 0 && input.charCodeAt(end - 1) === 47) end--; // 47 = "/"
   return input.slice(0, end);
+}
+
+/**
+ * One binding field of a dev persist input (drupal-mcp-connector#101), as a
+ * trimmed string, read ONLY from the input's own data property. An inherited
+ * field (for example one on Object.prototype), an accessor (its getter is
+ * never called) or a non-string value counts as absent (""). An older host
+ * passes the hook's object through unchanged, so only a field set on the
+ * object itself may bind the row.
+ */
+function ownStringField(input: object, key: "orgId" | "runBy"): string {
+  if (!Object.hasOwn(input, key)) return "";
+  const field = Object.getOwnPropertyDescriptor(input, key);
+  // The descriptor inherits from Object.prototype: test "value" as an own key.
+  if (!field || !Object.hasOwn(field, "value") || typeof field.value !== "string") return "";
+  return field.value.trim();
 }
 
 function normalizeSiteUrl(url: string): string {
@@ -455,12 +478,22 @@ export function buildDrupalInstanceClient(deps: DrupalInstanceStoreDeps): Drupal
    * ADDITIONALLY refused outside development via the host runtime-mode
    * capability). It must never become a general production affordance.
    *
+   * BINDING (drupal-mcp-connector#101, cinatra#4387): the host's dev persist
+   * wrapper adds the install→org binding (cinatra#274) of the boot's dev owner
+   * to the input — the hook itself never passes one. A COMPLETE `{orgId, runBy}`
+   * pair of the input's OWN data properties is written (and re-written on every
+   * boot); an inherited or accessor field counts as absent, and without a
+   * complete pair the row keeps its existing binding (it never writes half a
+   * new binding).
+   *
    * SECRET BOUNDARY: writes no credential (none is involved) and logs nothing.
    */
   async function persistLocalDevDrupalInstanceUnvalidated(input: {
     id?: string;
     name: string;
     siteUrl: string;
+    orgId?: string;
+    runBy?: string;
   }): Promise<DrupalInstanceSettings> {
     const siteUrl = trimTrailingSlashesLinear(input.siteUrl.trim());
     const host = (() => {
@@ -489,6 +522,12 @@ export function buildDrupalInstanceClient(deps: DrupalInstanceStoreDeps): Drupal
 
     const now = new Date().toISOString();
     const id = input.id?.trim() || existing?.id || randomUUID();
+    const inputOrgId = ownStringField(input, "orgId");
+    const inputRunBy = ownStringField(input, "runBy");
+    const binding =
+      inputOrgId && inputRunBy
+        ? { orgId: inputOrgId, runBy: inputRunBy }
+        : { orgId: existing?.orgId, runBy: existing?.runBy };
     const next: DrupalInstanceSettings = {
       id,
       name: trimmedName,
@@ -501,10 +540,11 @@ export function buildDrupalInstanceClient(deps: DrupalInstanceStoreDeps): Drupal
       // lastValidatedAt intentionally omitted — this row was NOT validated.
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
-      // Preserve any existing multi-tenant install→org binding (cinatra#274).
-      // This local-dev persist has no session, so it never sets a new binding.
-      orgId: existing?.orgId,
-      runBy: existing?.runBy,
+      // The multi-tenant install→org binding (cinatra#274): the complete pair
+      // the host added for the dev owner, else the existing one. This persist
+      // has no session and never resolves a binding itself.
+      orgId: binding.orgId,
+      runBy: binding.runBy,
     };
 
     const remaining = current.instances.filter(
