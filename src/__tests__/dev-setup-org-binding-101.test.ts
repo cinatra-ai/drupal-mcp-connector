@@ -505,4 +505,32 @@ describe("the dev persist binds only from the input's own data properties (drupa
     expect(row).toMatchObject({ orgId: "o-1", runBy: "u-1" });
     expect(reads).toBe(0);
   });
+
+  it("an own accessor pair stays absent when Object.prototype carries a value property", async () => {
+    // The descriptor Object.getOwnPropertyDescriptor returns inherits from
+    // Object.prototype, so a `value` on the prototype must not make an
+    // accessor look like a data property.
+    const c = harness({ nango: false }).client;
+    await c.persistLocalDevDrupalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082", orgId: "o-1", runBy: "u-1" });
+    let reads = 0;
+    const input = { name: "n", siteUrl: "http://localhost:8082" };
+    for (const [k, v] of [["orgId", "o-2"], ["runBy", "u-2"]] as const) {
+      Object.defineProperty(input, k, {
+        enumerable: true,
+        get: () => {
+          reads += 1;
+          return v;
+        },
+      });
+    }
+    let row: Record<string, unknown> = {};
+    try {
+      (Object.prototype as Record<string, unknown>).value = "spoofed";
+      row = { ...(await c.persistLocalDevDrupalInstanceUnvalidated(input as never)) };
+    } finally {
+      delete (Object.prototype as Record<string, unknown>).value;
+    }
+    expect(row).toMatchObject({ orgId: "o-1", runBy: "u-1" });
+    expect(reads).toBe(0);
+  });
 });

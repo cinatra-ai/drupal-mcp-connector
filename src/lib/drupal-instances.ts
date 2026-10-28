@@ -203,7 +203,8 @@ function trimTrailingSlashesLinear(input: string): string {
 function ownStringField(input: object, key: "orgId" | "runBy"): string {
   if (!Object.hasOwn(input, key)) return "";
   const field = Object.getOwnPropertyDescriptor(input, key);
-  if (!field || !("value" in field) || typeof field.value !== "string") return "";
+  // The descriptor inherits from Object.prototype: test "value" as an own key.
+  if (!field || !Object.hasOwn(field, "value") || typeof field.value !== "string") return "";
   return field.value.trim();
 }
 
