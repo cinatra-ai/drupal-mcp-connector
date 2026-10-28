@@ -192,6 +192,21 @@ function trimTrailingSlashesLinear(input: string): string {
   return input.slice(0, end);
 }
 
+/**
+ * One binding field of a dev persist input (drupal-mcp-connector#101), as a
+ * trimmed string, read ONLY from the input's own data property. An inherited
+ * field (for example one on Object.prototype), an accessor (its getter is
+ * never called) or a non-string value counts as absent (""). An older host
+ * passes the hook's object through unchanged, so only a field set on the
+ * object itself may bind the row.
+ */
+function ownStringField(input: object, key: "orgId" | "runBy"): string {
+  if (!Object.hasOwn(input, key)) return "";
+  const field = Object.getOwnPropertyDescriptor(input, key);
+  if (!field || !("value" in field) || typeof field.value !== "string") return "";
+  return field.value.trim();
+}
+
 function normalizeSiteUrl(url: string): string {
   return trimTrailingSlashesLinear(url.trim());
 }
@@ -465,8 +480,10 @@ export function buildDrupalInstanceClient(deps: DrupalInstanceStoreDeps): Drupal
    * BINDING (drupal-mcp-connector#101, cinatra#4387): the host's dev persist
    * wrapper adds the install→org binding (cinatra#274) of the boot's dev owner
    * to the input — the hook itself never passes one. A COMPLETE `{orgId, runBy}`
-   * pair is written (and re-written on every boot); without a complete pair the
-   * row keeps its existing binding (never half a binding).
+   * pair of the input's OWN data properties is written (and re-written on every
+   * boot); an inherited or accessor field counts as absent, and without a
+   * complete pair the row keeps its existing binding (it never writes half a
+   * new binding).
    *
    * SECRET BOUNDARY: writes no credential (none is involved) and logs nothing.
    */
@@ -504,8 +521,8 @@ export function buildDrupalInstanceClient(deps: DrupalInstanceStoreDeps): Drupal
 
     const now = new Date().toISOString();
     const id = input.id?.trim() || existing?.id || randomUUID();
-    const inputOrgId = typeof input.orgId === "string" ? input.orgId.trim() : "";
-    const inputRunBy = typeof input.runBy === "string" ? input.runBy.trim() : "";
+    const inputOrgId = ownStringField(input, "orgId");
+    const inputRunBy = ownStringField(input, "runBy");
     const binding =
       inputOrgId && inputRunBy
         ? { orgId: inputOrgId, runBy: inputRunBy }

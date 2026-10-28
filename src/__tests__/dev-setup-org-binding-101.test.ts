@@ -439,3 +439,70 @@ describe("persistLocalDevDrupalInstanceUnvalidated binding input (drupal-mcp-con
     expect(other.runBy).toBeUndefined();
   });
 });
+
+describe("the dev persist binds only from the input's own data properties (drupal-mcp-connector#101)", () => {
+  // An inherited pair: Object.prototype carries orgId and runBy (non-enumerable,
+  // so only a direct read sees them). The finally block restores the prototype.
+  async function withInheritedPair(run: () => Promise<void>) {
+    const keys = ["orgId", "runBy"] as const;
+    const before = keys.map((k) => Object.getOwnPropertyDescriptor(Object.prototype, k));
+    try {
+      Object.defineProperty(Object.prototype, "orgId", { value: "inherited-org", writable: true, configurable: true });
+      Object.defineProperty(Object.prototype, "runBy", { value: "inherited-user", writable: true, configurable: true });
+      await run();
+    } finally {
+      keys.forEach((k, i) => {
+        delete (Object.prototype as Record<string, unknown>)[k];
+        const d = before[i];
+        if (d) Object.defineProperty(Object.prototype, k, d);
+      });
+    }
+  }
+
+  it("older host, Nango off: an inherited pair does not bind the row the hook persists", async () => {
+    // An older host has no devSaveInstance and adds no owner: its persist
+    // member forwards the hook's object unchanged.
+    const h = harness({ nango: false, owner: null, hostHasDevSave: false });
+    await withInheritedPair(async () => {
+      const status = await autoSetupLocalDrupal(h.deps);
+      expect(status.status).toBe("created");
+    });
+    // Read after the prototype is restored: only the row's own fields remain.
+    expect(h.row()).toBeDefined();
+    expect(h.row()!.orgId).toBeUndefined();
+    expect(h.row()!.runBy).toBeUndefined();
+  });
+
+  it("an inherited pair counts as absent: an existing binding is kept, a new row gets none", async () => {
+    const c = harness({ nango: false }).client;
+    await c.persistLocalDevDrupalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082", orgId: "o-1", runBy: "u-1" });
+    let kept: Record<string, unknown> = {};
+    let fresh: Record<string, unknown> = {};
+    await withInheritedPair(async () => {
+      kept = { ...(await c.persistLocalDevDrupalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082" })) };
+      fresh = { ...(await c.persistLocalDevDrupalInstanceUnvalidated({ name: "m", siteUrl: "http://localhost:8083" })) };
+    });
+    expect(kept).toMatchObject({ orgId: "o-1", runBy: "u-1" });
+    expect(fresh.orgId).toBeUndefined();
+    expect(fresh.runBy).toBeUndefined();
+  });
+
+  it("an own accessor pair counts as absent and its getters are never called", async () => {
+    const c = harness({ nango: false }).client;
+    await c.persistLocalDevDrupalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082", orgId: "o-1", runBy: "u-1" });
+    let reads = 0;
+    const input = { name: "n", siteUrl: "http://localhost:8082" };
+    for (const [k, v] of [["orgId", "o-2"], ["runBy", "u-2"]] as const) {
+      Object.defineProperty(input, k, {
+        enumerable: true,
+        get: () => {
+          reads += 1;
+          return v;
+        },
+      });
+    }
+    const row = await c.persistLocalDevDrupalInstanceUnvalidated(input as never);
+    expect(row).toMatchObject({ orgId: "o-1", runBy: "u-1" });
+    expect(reads).toBe(0);
+  });
+});
