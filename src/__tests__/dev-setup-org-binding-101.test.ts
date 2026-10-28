@@ -506,10 +506,26 @@ describe("the dev persist binds only from the input's own data properties (drupa
     expect(reads).toBe(0);
   });
 
-  it("an own accessor pair stays absent when Object.prototype carries a value property", async () => {
-    // The descriptor Object.getOwnPropertyDescriptor returns inherits from
-    // Object.prototype, so a `value` on the prototype must not make an
-    // accessor look like a data property.
+  // Object.prototype.value = "spoofed" for the duration of one awaited call. The
+  // finally block restores the exact descriptor the prototype had before, or
+  // deletes the property when it had none.
+  async function withPrototypeValue<T>(run: () => Promise<T>): Promise<T> {
+    const before = Object.getOwnPropertyDescriptor(Object.prototype, "value");
+    try {
+      Object.defineProperty(Object.prototype, "value", { value: "spoofed", writable: true, enumerable: true, configurable: true });
+      return await run();
+    } finally {
+      if (before) Object.defineProperty(Object.prototype, "value", before);
+      else delete (Object.prototype as Record<string, unknown>).value;
+    }
+  }
+
+  // The descriptor Object.getOwnPropertyDescriptor returns inherits from
+  // Object.prototype, so a `value` on the prototype must not make an accessor
+  // look like a data property. Everything is built here, before the prototype
+  // is touched: an own accessor pair as the persist input, and an existing
+  // binding o-1/u-1 on the row. `run` is the one call made with the spoof.
+  async function prepareAccessorPairWithSpoofedValue() {
     const c = harness({ nango: false }).client;
     await c.persistLocalDevDrupalInstanceUnvalidated({ name: "n", siteUrl: "http://localhost:8082", orgId: "o-1", runBy: "u-1" });
     let reads = 0;
@@ -523,14 +539,35 @@ describe("the dev persist binds only from the input's own data properties (drupa
         },
       });
     }
+    return {
+      run: () => withPrototypeValue(() => c.persistLocalDevDrupalInstanceUnvalidated(input as never)),
+      reads: () => reads,
+    };
+  }
+
+  it("an own accessor pair stays absent when Object.prototype carries a value property", async () => {
+    const t = await prepareAccessorPairWithSpoofedValue();
+    const row = { ...(await t.run()) };
+    expect(row).toMatchObject({ orgId: "o-1", runBy: "u-1" });
+    expect(t.reads()).toBe(0);
+    expect(Object.getOwnPropertyDescriptor(Object.prototype, "value")).toBeUndefined();
+  });
+
+  it("a value property that Object.prototype already had is restored exactly after that test's logic", async () => {
+    const original = { value: "original", writable: true, enumerable: false, configurable: true };
+    const t = await prepareAccessorPairWithSpoofedValue();
     let row: Record<string, unknown> = {};
+    let after: PropertyDescriptor | undefined;
     try {
-      (Object.prototype as Record<string, unknown>).value = "spoofed";
-      row = { ...(await c.persistLocalDevDrupalInstanceUnvalidated(input as never)) };
+      Object.defineProperty(Object.prototype, "value", original);
+      row = { ...(await t.run()) };
+      after = Object.getOwnPropertyDescriptor(Object.prototype, "value");
     } finally {
       delete (Object.prototype as Record<string, unknown>).value;
     }
+    expect(after).toEqual(original);
     expect(row).toMatchObject({ orgId: "o-1", runBy: "u-1" });
-    expect(reads).toBe(0);
+    expect(t.reads()).toBe(0);
+    expect(Object.getOwnPropertyDescriptor(Object.prototype, "value")).toBeUndefined();
   });
 });
