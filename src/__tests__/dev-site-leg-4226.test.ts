@@ -18,21 +18,32 @@ import {
   type DrupalDevSetupDeps,
 } from "../dev-setup";
 
-const PROBE = ["sh", "-c", "grep -qsz 'cinatra-drupal-entrypoin[t]' /proc/[0-9]*/cmdline; [ $? -eq 1 ]"];
+/** Every leg call runs under coreutils `timeout` inside the container: TERM after `s` seconds, KILL 10 s later. */
+const bounded = (s: number, argv: string[]) => ["timeout", "-k", "10", String(s), ...argv];
+const PROBE = bounded(30, ["sh", "-c", "grep -qsz 'cinatra-drupal-entrypoin[t]' /proc/[0-9]*/cmdline; [ $? -eq 1 ]"]);
 // The probe exits 0 only when grep exited 1 (no command line names the entrypoint); a match or a grep error exits 1.
 const IDLE: Answer = { code: 0, out: "" };
 const BUSY: Answer = { code: 1, out: "" };
-const PM_LIST = ["drush", "--root=/drupal/web", "pm:list", "--status=enabled", "--type=module", "--field=name"];
-const ENABLE = ["env", "CINATRA_DEV_SITE=1", "drush", "--root=/drupal/web", "en", "cinatra_dev_site", "-y"];
-const ENSURE = [
+const PM_LIST = bounded(120, [
+  "drush",
+  "--root=/drupal/web",
+  "pm:list",
+  "--status=enabled",
+  "--type=module",
+  "--field=name",
+]);
+const ENABLE = bounded(600, ["env", "CINATRA_DEV_SITE=1", "drush", "--root=/drupal/web", "en", "cinatra_dev_site", "-y"]);
+/** The tag that starts the one line of the ensure() result; any other output (notices, stderr) is not read. */
+const TAG = "CINATRA_DEV_SITE_ENSURE_RESULT=";
+const ENSURE = bounded(300, [
   "env",
   "CINATRA_DEV_SITE=1",
   "drush",
   "--root=/drupal/web",
   "php:eval",
-  "echo json_encode(\\Drupal::service('cinatra_dev_site.ensure')->ensure());",
-];
-const EXPORT = ["drush", "--root=/drupal/web", "config:export", "--destination=/drupal/config/sync", "-y"];
+  "echo 'CINATRA_DEV_SITE_ENSURE_RESULT=' . json_encode(\\Drupal::service('cinatra_dev_site.ensure')->ensure()) . PHP_EOL;",
+]);
+const EXPORT = bounded(300, ["drush", "--root=/drupal/web", "config:export", "--destination=/drupal/config/sync", "-y"]);
 
 const ENABLED_LIST = "node\ncinatra\ncontent_moderation\n";
 const SECRET = "leg-secret-0123456789abcdef";
@@ -64,7 +75,7 @@ function docker(script: Script) {
       if (script.throwOn === "enable") throw new Error(`SENSITIVE-${SECRET}`);
       return script.enable ?? { code: 0, out: "[success] Module cinatra_dev_site has been installed." };
     }
-    if (k === key(ENSURE)) return script.ensure ?? { code: 0, out: '{"ok":true,"refused":[]}\n' };
+    if (k === key(ENSURE)) return script.ensure ?? { code: 0, out: `${TAG}{"ok":true,"refused":[]}\n` };
     if (k === key(EXPORT)) return script.exportCfg ?? { code: 0, out: "[success] Configuration successfully exported." };
     return { code: 0, out: "" };
   });
@@ -158,7 +169,32 @@ describe("ensureLocalDevSite: the steps and their order", () => {
     expect(DEV_SITE_WAIT.intervalMs).toBeGreaterThan(0);
     expect(DEV_SITE_WAIT.attempts * DEV_SITE_WAIT.intervalMs).toBeLessThanOrEqual(15 * 60 * 1000);
   });
+
+  it("the default wait is 300 probes 2 s apart within a 10-minute time budget", () => {
+    expect(DEV_SITE_WAIT).toEqual({ attempts: 300, intervalMs: 2000, budgetMs: 600_000 });
+  });
+
+  it("every leg call runs under a timeout inside the container", async () => {
+    const d = docker({ probe: [BUSY, IDLE] });
+    await ensureLocalDevSite(helpersWith(d), { sleep: noSleep(), attempts: 3, intervalMs: 1 });
+    const argvs = d.mock.calls.map((c) => c[1] as string[]);
+    expect(argvs).toEqual([PROBE, PROBE, PM_LIST, ENABLE, ENSURE, EXPORT]);
+    for (const argv of argvs) {
+      expect(argv.slice(0, 3)).toEqual(["timeout", "-k", "10"]);
+      expect(Number(argv[3])).toBeGreaterThan(0);
+    }
+  });
 });
+
+/** A fake clock: `now` reads it, `sleep` (and optionally each probe) moves it on. */
+function fakeClock() {
+  let t = 0;
+  const now = vi.fn(() => t);
+  const sleep = vi.fn(async (ms: number) => {
+    t += ms;
+  });
+  return { now, sleep, advance: (ms: number) => (t += ms) };
+}
 
 describe("ensureLocalDevSite: the bootstrap wait", () => {
   it("waits while the entrypoint bootstrap runs, then continues", async () => {
@@ -189,6 +225,7 @@ describe("ensureLocalDevSite: the bootstrap wait", () => {
     ["exit 1", 1],
     ["exit 2", 2],
     ["exit 127", 127],
+    ["a timed-out probe, exit 124", 124],
   ])("every non-zero probe exit counts as busy (%s)", async (_name, code) => {
     const d = docker({ probe: [{ code, out: "" }, IDLE] });
     const sleep = noSleep();
@@ -204,6 +241,64 @@ describe("ensureLocalDevSite: the bootstrap wait", () => {
     expect(out).toMatchObject({ state: "skipped" });
     expect(probeCount(d)).toBe(0);
     expect(legSteps(d)).toEqual([]);
+  });
+
+  it("the wait ends at the time budget although attempts remain", async () => {
+    const d = docker({ probe: [BUSY] });
+    const clock = fakeClock();
+    const out = await ensureLocalDevSite(helpersWith(d), {
+      sleep: clock.sleep,
+      now: clock.now,
+      attempts: 1000,
+      intervalMs: 10,
+      budgetMs: 25,
+    });
+    expect(out).toEqual({
+      state: "skipped",
+      reason: "the Drupal container bootstrap still runs; the development site leg did not run",
+    });
+    // Probes at 0, 10 and 20 ms; the pause that reaches 30 ms ends the wait before a fourth probe.
+    expect(probeCount(d)).toBe(3);
+    expect(legSteps(d)).toEqual([]);
+  });
+
+  it("a slow probe counts against the time budget", async () => {
+    const clock = fakeClock();
+    const d = docker({ probe: [BUSY] });
+    const slow = vi.fn((container: string, argv: string[]) => {
+      clock.advance(20);
+      return d(container, argv);
+    });
+    const out = await ensureLocalDevSite(helpersWith(slow as unknown as ReturnType<typeof docker>), {
+      sleep: clock.sleep,
+      now: clock.now,
+      attempts: 1000,
+      intervalMs: 10,
+      budgetMs: 25,
+    });
+    expect(out).toMatchObject({ state: "skipped" });
+    expect(probeCount(d)).toBe(1);
+  });
+
+  const INF = Number.POSITIVE_INFINITY;
+  it.each<[string, { attempts: number; intervalMs: number; budgetMs: number }]>([
+    ["NaN", { attempts: Number.NaN, intervalMs: Number.NaN, budgetMs: Number.NaN }],
+    ["negative", { attempts: -1, intervalMs: -5, budgetMs: -1 }],
+    ["infinite", { attempts: INF, intervalMs: INF, budgetMs: INF }],
+  ])("%s option values fall back to the defaults", async (_name, values) => {
+    const d = docker({ probe: [BUSY] });
+    const clock = fakeClock();
+    const out = await ensureLocalDevSite(helpersWith(d), { sleep: clock.sleep, now: clock.now, ...values });
+    expect(out).toMatchObject({ state: "skipped" });
+    expect(probeCount(d)).toBe(300);
+    expect(clock.sleep).toHaveBeenCalledTimes(299);
+    expect(new Set(clock.sleep.mock.calls.map((c) => c[0]))).toEqual(new Set([2000]));
+  });
+
+  it("a fractional attempt count is rounded down", async () => {
+    const d = docker({ probe: [BUSY] });
+    await ensureLocalDevSite(helpersWith(d), { sleep: noSleep(), attempts: 2.5, intervalMs: 1 });
+    expect(probeCount(d)).toBe(2);
   });
 });
 
@@ -246,7 +341,7 @@ describe("ensureLocalDevSite: enable, ensure and export", () => {
   });
 
   it("ensure() answering ok false is an error, and the export still runs", async () => {
-    const d = docker({ ensure: { code: 0, out: `{"ok":false,"refused":["no_marker","${SECRET}"]}` } });
+    const d = docker({ ensure: { code: 0, out: `${TAG}{"ok":false,"refused":["no_marker","${SECRET}"]}\n` } });
     const out = await ensureLocalDevSite(helpersWith(d), { sleep: noSleep() });
     expect(out).toEqual({
       state: "error",
@@ -257,18 +352,21 @@ describe("ensureLocalDevSite: enable, ensure and export", () => {
   });
 
   it("a failed ensure process is an error, and the export still runs", async () => {
-    const d = docker({ ensure: { code: 255, out: '{"ok":true}' } });
+    const d = docker({ ensure: { code: 255, out: `${TAG}{"ok":true}\n` } });
     const out = await ensureLocalDevSite(helpersWith(d), { sleep: noSleep() });
     expect(out).toMatchObject({ state: "error" });
     expect(legSteps(d)).toEqual(["pm:list", "en", "ensure", "export"]);
   });
 
   it.each([
-    ["no JSON", "PHP Fatal error: Uncaught exception"],
-    ["ok as a string", '{"ok":"true"}'],
-    ["ok as a number", '{"ok":1}'],
-    ["no ok key", '{"refused":[]}'],
-    ["a JSON list", "[true]"],
+    ["no result line", "PHP Fatal error: Uncaught exception"],
+    ["ok as a string", `${TAG}{"ok":"true"}`],
+    ["ok as a number", `${TAG}{"ok":1}`],
+    ["no ok key", `${TAG}{"refused":[]}`],
+    ["a JSON list", `${TAG}[true]`],
+    ["JSON null", `${TAG}null`],
+    ["a result line with no JSON", `${TAG}`],
+    ["a malformed result line", `${TAG}{"ok": tru`],
     ["empty output", ""],
   ])("only ok === true counts (%s)", async (_name, outText) => {
     const d = docker({ ensure: { code: 0, out: outText } });
@@ -279,19 +377,38 @@ describe("ensureLocalDevSite: enable, ensure and export", () => {
     });
   });
 
-  it("reads the last JSON line of the output (notices before it are ignored)", async () => {
-    const d = docker({ ensure: { code: 0, out: '[notice] Rebuilt the router.\n{"ok":false}\n{"ok":true,"refused":[]}\n\n' } });
+  it("reads only the tagged result line (notices and untagged JSON around it are not read)", async () => {
+    const d = docker({
+      ensure: { code: 0, out: `[notice] Rebuilt the router.\n{"ok":false}\n${TAG}{"ok":true,"refused":[]}\n\n{"ok":false}\n` },
+    });
     expect(await ensureLocalDevSite(helpersWith(d), { sleep: noSleep() })).toEqual({ state: "armed" });
   });
 
-  it("a line that starts with { but is no JSON is passed over", async () => {
-    const d = docker({ ensure: { code: 0, out: '{"ok":true}\n{"ok": tru' } });
-    expect(await ensureLocalDevSite(helpersWith(d), { sleep: noSleep() })).toEqual({ state: "armed" });
+  it("untagged JSON never arms, even a last line with ok true (stdout and stderr are joined)", async () => {
+    const d = docker({ ensure: { code: 0, out: '{"ok":false}\n{"ok":true}' } });
+    expect(await ensureLocalDevSite(helpersWith(d), { sleep: noSleep() })).toEqual({
+      state: "error",
+      reason: "cinatra_dev_site ensure() did not report ok; the development site is not armed",
+    });
   });
 
-  it("a later ok false line decides over an earlier ok true line", async () => {
-    const d = docker({ ensure: { code: 0, out: '{"ok":true}\n{"ok":false}\n[notice] done' } });
+  it.each([
+    ["both ok true", `${TAG}{"ok":true}\n${TAG}{"ok":true}\n`],
+    ["ok true, then a malformed result line", `${TAG}{"ok":true}\n${TAG}{"ok": tru`],
+    ["ok false, then ok true", `${TAG}{"ok":false}\n${TAG}{"ok":true}\n`],
+  ])("two result lines are an error (%s)", async (_name, outText) => {
+    const d = docker({ ensure: { code: 0, out: outText } });
     expect(await ensureLocalDevSite(helpersWith(d), { sleep: noSleep() })).toMatchObject({ state: "error" });
+  });
+
+  it("the tag counts only at the start of a line", async () => {
+    const d = docker({ ensure: { code: 0, out: `[notice] ${TAG}{"ok":true}\n` } });
+    expect(await ensureLocalDevSite(helpersWith(d), { sleep: noSleep() })).toMatchObject({ state: "error" });
+  });
+
+  it("a result line with a carriage return still arms", async () => {
+    const d = docker({ ensure: { code: 0, out: `${TAG}{"ok":true}\r\n` } });
+    expect(await ensureLocalDevSite(helpersWith(d), { sleep: noSleep() })).toEqual({ state: "armed" });
   });
 
   it("an armed site whose export fails is an error", async () => {
@@ -305,7 +422,7 @@ describe("ensureLocalDevSite: enable, ensure and export", () => {
   });
 
   it("ensure() not ok and a failed export name both failures", async () => {
-    const d = docker({ ensure: { code: 0, out: '{"ok":false}' }, exportCfg: { code: 1, out: "" } });
+    const d = docker({ ensure: { code: 0, out: `${TAG}{"ok":false}` }, exportCfg: { code: 1, out: "" } });
     expect(await ensureLocalDevSite(helpersWith(d), { sleep: noSleep() })).toEqual({
       state: "error",
       reason:
@@ -357,7 +474,7 @@ describe("autoSetupLocalDrupal with the development-site leg", () => {
   });
 
   it("a leg error fails the boot status with the leg's fixed reason, after the wiring ran", async () => {
-    const h = hookDeps({ ensure: { code: 0, out: `{"ok":false,"refused":["${SECRET}"]}` } });
+    const h = hookDeps({ ensure: { code: 0, out: `${TAG}{"ok":false,"refused":["${SECRET}"]}` } });
     const status = await autoSetupLocalDrupal(h.deps);
     expect(status).toEqual({
       status: "error",
@@ -411,7 +528,7 @@ function legLogLines(log: ReturnType<typeof vi.fn>): string[] {
 
 describe("autoSetupLocalDrupal: the leg's log line and the already-wired status", () => {
   it("a leg error over an already-wired instance fails the boot status with the leg's fixed reason", async () => {
-    const h = hookDeps({ ensure: { code: 0, out: `{"ok":false,"refused":["${SECRET}"]}` } });
+    const h = hookDeps({ ensure: { code: 0, out: `${TAG}{"ok":false,"refused":["${SECRET}"]}` } });
     (h.deps.drupal.listInstances as ReturnType<typeof vi.fn>).mockReturnValue([
       { id: "drupal-dev-1", name: LOCAL_DRUPAL.instanceName, siteUrl: LOCAL_DRUPAL.siteUrl },
     ]);
@@ -428,7 +545,7 @@ describe("autoSetupLocalDrupal: the leg's log line and the already-wired status"
   });
 
   it.each<[string, Script]>([
-    ["ensure() ok false with drush output", { ensure: { code: 0, out: `{"ok":false,"refused":["${SECRET}"]}` } }],
+    ["ensure() ok false with drush output", { ensure: { code: 0, out: `${TAG}{"ok":false,"refused":["${SECRET}"]}` } }],
     ["a failed ensure process", { ensure: { code: 255, out: `[error] ${SECRET}` } }],
     ["a failed en", { enable: { code: 1, out: `[error] ${SECRET}` } }],
     ["a failed export", { exportCfg: { code: 1, out: `[error] ${SECRET}` } }],
@@ -451,5 +568,37 @@ describe("autoSetupLocalDrupal: the leg's log line and the already-wired status"
     const h = hookDeps(script);
     await autoSetupLocalDrupal(h.deps);
     expect(legLogLines(h.log)).toHaveLength(1);
+  });
+});
+
+describe("autoSetupLocalDrupal: a throwing log never skips the wiring", () => {
+  /** A log double that throws on the leg's own line only (the wiring's log lines pass). */
+  function throwOnLegLine(log: ReturnType<typeof vi.fn>) {
+    log.mockImplementation((line: string) => {
+      if (String(line).startsWith("development site ")) throw new Error(`SENSITIVE-${SECRET}`);
+    });
+  }
+
+  it("an armed leg whose log line throws keeps the wiring status", async () => {
+    const h = hookDeps({});
+    throwOnLegLine(h.log);
+    const status = await autoSetupLocalDrupal(h.deps);
+    expect(status).toMatchObject({ status: "created", siteUrl: LOCAL_DRUPAL.siteUrl });
+    expect(configSetCalls(h.d)).toBe(3);
+    expect(h.deps.drupal.devPersistLocalInstanceUnvalidated).toHaveBeenCalledTimes(1);
+  });
+
+  it("a leg error whose log line throws still wires and reports the leg's fixed reason", async () => {
+    const h = hookDeps({ enable: { code: 1, out: "" } });
+    throwOnLegLine(h.log);
+    const status = await autoSetupLocalDrupal(h.deps);
+    expect(status).toEqual({
+      status: "error",
+      reason:
+        "drush en cinatra_dev_site failed; the development site is not armed " +
+        "(the instance and widget wiring completed: created)",
+    });
+    expect(configSetCalls(h.d)).toBe(3);
+    expect(JSON.stringify(status)).not.toContain(SECRET);
   });
 });
