@@ -403,3 +403,53 @@ describe("autoSetupLocalDrupal with the development-site leg", () => {
     );
   });
 });
+
+/** The leg's own log lines (the wiring's log lines left out). */
+function legLogLines(log: ReturnType<typeof vi.fn>): string[] {
+  return log.mock.calls.map((c) => String(c[0])).filter((line) => line.startsWith("development site "));
+}
+
+describe("autoSetupLocalDrupal: the leg's log line and the already-wired status", () => {
+  it("a leg error over an already-wired instance fails the boot status with the leg's fixed reason", async () => {
+    const h = hookDeps({ ensure: { code: 0, out: `{"ok":false,"refused":["${SECRET}"]}` } });
+    (h.deps.drupal.listInstances as ReturnType<typeof vi.fn>).mockReturnValue([
+      { id: "drupal-dev-1", name: LOCAL_DRUPAL.instanceName, siteUrl: LOCAL_DRUPAL.siteUrl },
+    ]);
+    const status = await autoSetupLocalDrupal(h.deps);
+    expect(status).toEqual({
+      status: "error",
+      reason:
+        "cinatra_dev_site ensure() did not report ok; the development site is not armed " +
+        "(the instance and widget wiring completed: already-wired)",
+    });
+    expect(configSetCalls(h.d)).toBe(3);
+    expect(JSON.stringify(status)).not.toContain(SECRET);
+    expect(JSON.stringify(h.log.mock.calls)).not.toContain(SECRET);
+  });
+
+  it.each<[string, Script]>([
+    ["ensure() ok false with drush output", { ensure: { code: 0, out: `{"ok":false,"refused":["${SECRET}"]}` } }],
+    ["a failed ensure process", { ensure: { code: 255, out: `[error] ${SECRET}` } }],
+    ["a failed en", { enable: { code: 1, out: `[error] ${SECRET}` } }],
+    ["a failed export", { exportCfg: { code: 1, out: `[error] ${SECRET}` } }],
+    ["a failed pm:list", { pmList: { code: 1, out: `cinatra\n${SECRET}` } }],
+    ["a throwing probe", { throwOn: "probe" }],
+    ["a throwing en", { throwOn: "enable" }],
+  ])("no drush output or exception text reaches the log or the status (%s)", async (_name, script) => {
+    const h = hookDeps(script);
+    const status = await autoSetupLocalDrupal(h.deps);
+    expect(JSON.stringify(h.log.mock.calls)).not.toContain(SECRET);
+    expect(JSON.stringify(status)).not.toContain(SECRET);
+  });
+
+  it.each<[string, Script]>([
+    ["armed", {}],
+    ["skipped", { pmList: { code: 0, out: "node\n" } }],
+    ["error", { enable: { code: 1, out: "" } }],
+    ["a throw", { throwOn: "probe" }],
+  ])("every leg outcome is logged exactly once (%s)", async (_name, script) => {
+    const h = hookDeps(script);
+    await autoSetupLocalDrupal(h.deps);
+    expect(legLogLines(h.log)).toHaveLength(1);
+  });
+});
