@@ -48,6 +48,8 @@ export type ModulePreimage = {
   workflow_fingerprint: string; preimage_fingerprint: string;
   fields: StoredFieldItems;
   available_fields?: string[];
+  /** The node's translation language codes, when the module reports them in a safe shape. */
+  translation_languages?: string[];
 };
 export type ModuleDraftPlan = { state: string; preimage: ModulePreimage };
 export type ModuleStoredRevision = {
@@ -100,6 +102,16 @@ function storedFields(value: unknown, requested: string[]): StoredFieldItems {
   return fields as StoredFieldItems;
 }
 
+// A module that reports the node's translations sends a non-empty array of
+// unique safe codes. Any other shape is dropped (never repaired): a caller that
+// needs the list then refuses.
+function translationLanguages(value: unknown): { translation_languages?: string[] } {
+  return Array.isArray(value) && value.length > 0
+    && value.every((code) => typeof code === "string" && /^[a-zA-Z0-9_-]+$/.test(code))
+    && new Set(value).size === value.length
+    ? { translation_languages: [...value] as string[] } : {};
+}
+
 /** Validate one atomic-module preimage, never independent generic reads. */
 export function prepareModuleDraft(value: unknown, expected: ModuleDraftIdentity): ModuleDraftPlan {
   const result = payload(value);
@@ -129,6 +141,7 @@ export function prepareModuleDraft(value: unknown, expected: ModuleDraftIdentity
       fields: storedFields(result.fields, expected.fields),
       ...(Array.isArray(result.available_fields) && result.available_fields.every((field) => typeof field === "string" && /^[a-z][a-z0-9_]*$/.test(field) && !protectedFields.has(field))
         ? { available_fields: result.available_fields as string[] } : {}),
+      ...(translationLanguages(result.translation_languages)),
     },
   };
 }
