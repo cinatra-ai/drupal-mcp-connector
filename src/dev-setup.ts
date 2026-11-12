@@ -360,6 +360,157 @@ export async function wireLocalDrupalWithoutNango(
       };
 }
 
+// ---------------------------------------------------------------------------
+// The development-site leg (cinatra-ai/cinatra#4226, #4227)
+// ---------------------------------------------------------------------------
+
+/**
+ * The bootstrap wait of the leg: one probe, then a pause of `intervalMs`
+ * before each further probe, at most `attempts` probes, and no probe after
+ * `budgetMs` of wall time from the first probe (probe time counts).
+ */
+export const DEV_SITE_WAIT = { attempts: 300, intervalMs: 2000, budgetMs: 600_000 } as const;
+
+/**
+ * Every leg call runs under coreutils `timeout` INSIDE the container (the
+ * Debian-based Drupal image ships it): TERM after the limit, KILL 10 s later;
+ * a timed-out call exits non-zero (124 or 137), which every step reads as a
+ * failure (the probe as busy). The host helper `dockerExecCapture` is a
+ * synchronous spawnSync with no timeout of its own, so a docker client or
+ * daemon that never returns is not bounded here (as for every other call of
+ * this hook).
+ */
+const DEV_SITE_STEP_TIMEOUT_S = { probe: 30, pmList: 120, enable: 600, ensure: 300, export: 300 } as const;
+
+function bounded(seconds: number, argv: string[]): string[] {
+  return ["timeout", "-k", "10", String(seconds), ...argv];
+}
+
+/** The marker that the submodule's install requirement and `ensure()` read. */
+const DEV_SITE_MARKER = "CINATRA_DEV_SITE=1";
+
+/**
+ * Exit 0 (idle) only when grep exits 1: it read the command lines and none
+ * names the entrypoint script (the script runs its bootstrap as a background
+ * subshell). A match and every grep error (an unreadable /proc, no grep) exit
+ * non-zero (busy). The bracket keeps this probe's own command line from
+ * matching.
+ */
+const BOOTSTRAP_PROBE = "grep -qsz 'cinatra-drupal-entrypoin[t]' /proc/[0-9]*/cmdline; [ $? -eq 1 ]";
+
+/**
+ * The tag that starts the one result line of `ensure()`. The host joins
+ * stdout and stderr, so only a line that starts with this tag is read.
+ */
+const DEV_SITE_RESULT_TAG = "CINATRA_DEV_SITE_ENSURE_RESULT=";
+
+/** `ensure()` in its own drush process: one tagged JSON line with its `ok` key. */
+const DEV_SITE_ENSURE_EVAL =
+  "echo 'CINATRA_DEV_SITE_ENSURE_RESULT=' . json_encode(\\Drupal::service('cinatra_dev_site.ensure')->ensure()) . PHP_EOL;";
+
+const DEV_SITE_NOT_ARMED = "cinatra_dev_site ensure() did not report ok; the development site is not armed";
+const DEV_SITE_NOT_EXPORTED =
+  "drush config:export failed after cinatra_dev_site was enabled; the sync directory was not refreshed";
+
+export type DevSiteLegOutcome =
+  | { state: "armed" }
+  | { state: "skipped"; reason: string }
+  | { state: "error"; reason: string };
+
+export type DevSiteLegOptions = {
+  attempts?: number;
+  intervalMs?: number;
+  budgetMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+};
+
+/** A finite, non-negative whole number, else the default. */
+function wholeOr(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+}
+
+/**
+ * TRUE only when the output holds exactly one line that starts with the
+ * result tag, the rest of that line parses as a JSON object, and its `ok` is
+ * exactly `true`. No tagged line, two tagged lines or a malformed one: FALSE.
+ */
+function ensureReportedOk(out: string): boolean {
+  const tagged = out.split("\n").filter((line) => line.startsWith(DEV_SITE_RESULT_TAG));
+  if (tagged.length !== 1) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(tagged[0].slice(DEV_SITE_RESULT_TAG.length).trim());
+  } catch {
+    return false;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  return (parsed as { ok?: unknown }).ok === true;
+}
+
+/**
+ * The post-boot leg that enables and arms the `cinatra_dev_site` submodule of
+ * drupal-module on the local container:
+ *   1. wait until the entrypoint bootstrap ends (soft-skip after the attempts;
+ *      a probe that cannot read the processes counts as busy);
+ *   2. continue only when `pm:list` lists `cinatra` as enabled (else soft-skip);
+ *   3. `drush en cinatra_dev_site` with the marker (a failure is an error and
+ *      ends the leg);
+ *   4. `ensure()` in a separate drush process with the marker; only
+ *      `ok === true` arms;
+ *   5. `drush config:export` whatever step 4 returned (the submodule's
+ *      export transform decides what reaches the sync directory).
+ * Never throws. SECRET BOUNDARY: reasons are fixed labels, never drush output.
+ */
+export async function ensureLocalDevSite(
+  helpers: ExtensionDevSetupHelpers,
+  options: DevSiteLegOptions = {},
+): Promise<DevSiteLegOutcome> {
+  const attempts = wholeOr(options.attempts, DEV_SITE_WAIT.attempts);
+  const intervalMs = wholeOr(options.intervalMs, DEV_SITE_WAIT.intervalMs);
+  const budgetMs = wholeOr(options.budgetMs, DEV_SITE_WAIT.budgetMs);
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const now = options.now ?? Date.now;
+  const exec = (argv: string[]) => helpers.dockerExecCapture(LOCAL_DRUPAL.containerName, argv);
+  const drush = (seconds: number, args: string[]) => exec(bounded(seconds, ["drush", "--root=/drupal/web", ...args]));
+  const T = DEV_SITE_STEP_TIMEOUT_S;
+  try {
+    let idle = false;
+    const start = now();
+    for (let i = 0; i < attempts && !idle; i++) {
+      if (i > 0) {
+        await sleep(intervalMs);
+        if (now() - start >= budgetMs) break;
+      }
+      idle = exec(bounded(T.probe, ["sh", "-c", BOOTSTRAP_PROBE])).code === 0;
+    }
+    if (!idle) {
+      return { state: "skipped", reason: "the Drupal container bootstrap still runs; the development site leg did not run" };
+    }
+
+    const enabled = drush(T.pmList, ["pm:list", "--status=enabled", "--type=module", "--field=name"]);
+    if (enabled.code !== 0 || !enabled.out.split("\n").some((line) => line.trim() === "cinatra")) {
+      return { state: "skipped", reason: "the cinatra module is not enabled; the development site leg did not run" };
+    }
+
+    const marked = ["env", DEV_SITE_MARKER, "drush", "--root=/drupal/web"];
+    if (exec(bounded(T.enable, [...marked, "en", "cinatra_dev_site", "-y"])).code !== 0) {
+      return { state: "error", reason: "drush en cinatra_dev_site failed; the development site is not armed" };
+    }
+
+    const ensured = exec(bounded(T.ensure, [...marked, "php:eval", DEV_SITE_ENSURE_EVAL]));
+    const armed = ensured.code === 0 && ensureReportedOk(ensured.out);
+
+    const exported = drush(T.export, ["config:export", "--destination=/drupal/config/sync", "-y"]).code === 0;
+
+    if (armed && exported) return { state: "armed" };
+    const reasons = [...(armed ? [] : [DEV_SITE_NOT_ARMED]), ...(exported ? [] : [DEV_SITE_NOT_EXPORTED])];
+    return { state: "error", reason: reasons.join("; ") };
+  } catch {
+    return { state: "error", reason: "the development site leg failed unexpectedly" };
+  }
+}
+
 /**
  * The Drupal auto-setup entry (exported for tests; `runDevSetup` wraps it with
  * capability resolution). SOFT-FAILS: an outer try/catch guarantees an
@@ -423,6 +574,40 @@ async function autoSetupLocalDrupalBody(
       reason: "module clone missing at dev/drupal-module/cinatra/cinatra.module. Run `cinatra setup dev` first.",
     };
   }
+
+  // The development-site leg (cinatra#4226/#4227) runs here, after the module
+  // probe. The wiring below runs whatever the leg returned; a throwing log
+  // call does not skip it.
+  const devSite = await ensureLocalDevSite(helpers);
+  try {
+    deps.log(
+      devSite.state === "armed"
+        ? "development site armed (cinatra_dev_site ensure() ok; configuration exported)."
+        : `development site leg: ${devSite.reason}`,
+    );
+  } catch {
+    // SECRET BOUNDARY: nothing of the throw is kept or forwarded.
+  }
+  return withDevSiteOutcome(await wireLocalDrupalInstance(deps), devSite);
+}
+
+/**
+ * A leg error fails a boot whose wiring succeeded, with the leg's fixed
+ * reason. A wiring error or skip keeps its own status.
+ */
+function withDevSiteOutcome(status: ExtensionDevSetupStatus, devSite: DevSiteLegOutcome): ExtensionDevSetupStatus {
+  if (devSite.state !== "error" || (status.status !== "created" && status.status !== "already-wired")) {
+    return status;
+  }
+  return {
+    status: "error",
+    reason: `${devSite.reason} (the instance and widget wiring completed: ${status.status})`,
+  };
+}
+
+/** The instance and widget wiring after the probes. */
+async function wireLocalDrupalInstance(deps: DrupalDevSetupDeps): Promise<ExtensionDevSetupStatus> {
+  const { helpers } = deps;
 
   // Cinatra-side: generate or reuse the UUID-pair api_key (lives in
   // connector_config:drupal_widget_auth). This is the WIDGET Bearer (the
