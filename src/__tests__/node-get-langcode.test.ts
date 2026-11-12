@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// The node read must hand its caller the node's language. The live
-// drupal/mcp_tools `mcp_jsonapi_list_entities` serializer does NOT carry a
-// `langcode` key, neither at the top level nor in `fields`; the only language
-// value it prints for a node is the computed `path` field item's `langcode`.
-// Without a language the content editor's published edit is refused before any
-// write ("the actual read did not provide a non-empty nodeLanguage").
+// The node read must hand its caller the node's language. The recorded live
+// `mcp_jsonapi_list_entities` item has no top-level `langcode` and no
+// `fields.langcode` before `body` (the record is cut inside `body`); its only
+// language value is the computed `path` field item's `langcode`. Without a
+// language the content editor's published edit is refused before any write
+// ("the actual read did not provide a non-empty nodeLanguage"). A path-only
+// language is a candidate; node-language-binding.test.ts pins its binding.
 vi.mock("../lib/drupal-mcp-client", () => ({ callDrupalMcp: vi.fn() }));
 
 import { callDrupalMcp } from "../lib/drupal-mcp-client";
@@ -125,7 +126,7 @@ describe("drupal_node_get hands over the node's language", () => {
 
   it("does not replace a langcode the read carries with the path language", async () => {
     readAnswers(liveItem({ langcode: { value: "de" }, path: [{ langcode: "en" }] }));
-    expect((await get()).langcode).not.toBe("en");
+    expect((await get()).langcode).toEqual({ value: "de" });
   });
 });
 
