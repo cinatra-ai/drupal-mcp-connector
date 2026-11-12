@@ -241,27 +241,38 @@ type McpJsonApiEntity = {
 // A language code the protected draft can bind to: letters, digits, underscores
 // or hyphens (the same shape drupal_node_create_draft_revision accepts).
 const LANGCODE = /^[a-zA-Z0-9_-]+$/;
-// Drupal's LANGCODE_NOT_SPECIFIED and LANGCODE_NOT_APPLICABLE. The computed
-// `path` item answers one of these when it found a language-neutral ALIAS for
-// the node, so on the path item it never names the node's own language.
+// Drupal's LANGCODE_NOT_SPECIFIED and LANGCODE_NOT_APPLICABLE, compared without
+// case. On the path item one of these can stand for a language-neutral alias
+// rather than the node's language; it can also be a node's real language. Either
+// way a path item that names one gives no language here (a known refusal, never
+// a wrong write).
 const NEUTRAL_LANGCODES = new Set(["und", "zxx"]);
 
-// The node's language from the serialized read. The live drupal/mcp_tools
-// serializer prints NO `langcode` key (neither top level nor in `fields`); its
-// only language value is the computed `path` field item's `langcode`, which
-// Drupal core sets to the language of the serialized translation itself (the
-// same translation the title and body come from), or to a neutral code when a
-// language-neutral alias exists. Order:
-// 1. a `langcode` the read itself carries (in `fields`, else top level) wins;
-//    when that value is not a safe code nothing is derived (fail-closed);
-// 2. otherwise the path items' one shared, safe, non-neutral `langcode`;
-// 3. otherwise none: the protected draft then refuses before any module call.
-// Never the site default. The module's protected read refuses a language the
-// node has no translation in, so a wrong code cannot reach a write.
-function nodeLangcode(entity: McpJsonApiEntity, fields: Record<string, unknown>): string | undefined {
-  const own = fields.langcode ?? (entity as { langcode?: unknown }).langcode;
+// The flattened reads whose `langcode` came ONLY from the computed `path` item.
+// Such a value is a candidate, not proof of the serialized translation's
+// language: when the path field is untranslatable, Drupal answers the default
+// translation's language there even if another translation was serialized. The
+// protected draft binds it to the module's reported translations before any
+// write (drupal_node_create_draft_revision).
+const PATH_ONLY_LANGCODE = new WeakSet<object>();
+
+// The node's language from the serialized read, and whether it is path-only.
+// 1. A `langcode` the read itself carries (in `fields`, else at the top level)
+//    wins; `null` counts as absent. When that value is not a safe code, nothing
+//    is derived: an unsafe `fields` value stays in the read as-is, a top-level
+//    one is not copied, and the draft refuses either.
+// 2. Otherwise the one value all `path` items share, when it is a safe code and
+//    not a neutral one: a path-only candidate (see PATH_ONLY_LANGCODE).
+// 3. Otherwise none, and the protected draft refuses before any module call.
+// The site's default language is never read or assumed here.
+function nodeLangcode(
+  entity: McpJsonApiEntity,
+  fields: Record<string, unknown>,
+): { code: string; pathOnly: boolean } | undefined {
+  const fieldCode = fields.langcode;
+  const own = fieldCode !== undefined && fieldCode !== null ? fieldCode : (entity as { langcode?: unknown }).langcode;
   if (own !== undefined && own !== null) {
-    return typeof own === "string" && LANGCODE.test(own) ? own : undefined;
+    return typeof own === "string" && LANGCODE.test(own) ? { code: own, pathOnly: false } : undefined;
   }
   const items = Array.isArray(fields.path) ? fields.path : [];
   const codes = new Set<unknown>(
@@ -269,18 +280,20 @@ function nodeLangcode(entity: McpJsonApiEntity, fields: Record<string, unknown>)
   );
   if (codes.size !== 1) return undefined;
   const [code] = [...codes];
-  return typeof code === "string" && LANGCODE.test(code) && !NEUTRAL_LANGCODES.has(code) ? code : undefined;
+  return typeof code === "string" && LANGCODE.test(code) && !NEUTRAL_LANGCODES.has(code.toLowerCase())
+    ? { code, pathOnly: true }
+    : undefined;
 }
 
 function flattenMcpNode(entity: McpJsonApiEntity): Record<string, unknown> {
   const fields =
     entity.fields && typeof entity.fields === "object" ? entity.fields : {};
   const idNum = Number(entity.id);
-  const langcode = nodeLangcode(entity, fields);
+  const language = nodeLangcode(entity, fields);
   // Spread the module's flattened field map first, then overwrite the editable
   // before-values with normalized top-level forms so a compound field value can
   // never clobber the `title`/`body` strings the diff reads.
-  return {
+  const node: Record<string, unknown> = {
     ...fields,
     id: entity.id != null ? String(entity.id) : undefined,
     nid: Number.isFinite(idNum) ? idNum : undefined,
@@ -297,8 +310,10 @@ function flattenMcpNode(entity: McpJsonApiEntity): Record<string, unknown> {
     status: entity.status,
     // Only a derived code is set: a read that carries its own unsafe
     // `langcode` keeps it as-is above, and the draft write refuses it.
-    ...(langcode !== undefined ? { langcode } : {}),
+    ...(language !== undefined ? { langcode: language.code } : {}),
   };
+  if (language?.pathOnly) PATH_ONLY_LANGCODE.add(node);
+  return node;
 }
 
 // Full-field single-node read over the Drupal MCP module. Runs
@@ -499,6 +514,10 @@ export function createDrupalPrimitiveHandlers() {
       if (typeof language !== "string" || !/^[a-zA-Z0-9_-]+$/.test(language)) {
         throw new Error("Protected draft unavailable: the exact language is absent; read it or supply an explicit translation.");
       }
+      // A language that equals the fresh read's path-only candidate (the agent
+      // passes the read's language back, so an explicit equal value counts too)
+      // is bound below to the module's reported translations before any write.
+      const pathOnlyLanguage = PATH_ONLY_LANGCODE.has(current) && language === current.langcode;
       const expected: ModuleDraftIdentity = { nid, uuid: current.uuid, language, fields: Object.keys(fields).sort() };
       const readPreimage = async (identity: ModuleDraftIdentity): Promise<ModuleDraftPlan> => {
         let result: unknown;
@@ -510,6 +529,12 @@ export function createDrupalPrimitiveHandlers() {
         return prepareModuleDraft(result, identity);
       };
       const requestedPlan = await readPreimage(expected);
+      if (pathOnlyLanguage) {
+        const translations = requestedPlan.preimage.translation_languages;
+        if (!translations || translations.length !== 1 || translations[0] !== language) {
+          throw new Error("Protected draft unavailable: the page language was read only from its path item, which can name another translation, and the Cinatra module did not report this page as having exactly that one translation. Supply the translation explicitly. No Drupal content was written.");
+        }
+      }
       const available = requestedPlan.preimage.available_fields;
       if (!available?.length || new Set(available).size !== available.length || expected.fields.some((name) => !available.includes(name))) {
         throw new Error("Protected draft unavailable: the complete readable field names are missing from the module preimage.");
