@@ -238,10 +238,45 @@ type McpJsonApiEntity = {
 // `summary` defaults to "" (see the #1214 S2 note). The GATE before-value —
 // `body.value` — IS preserved, so this is a full-body read, never a
 // summary-only degradation.
+// A language code the protected draft can bind to: letters, digits, underscores
+// or hyphens (the same shape drupal_node_create_draft_revision accepts).
+const LANGCODE = /^[a-zA-Z0-9_-]+$/;
+// Drupal's LANGCODE_NOT_SPECIFIED and LANGCODE_NOT_APPLICABLE. The computed
+// `path` item answers one of these when it found a language-neutral ALIAS for
+// the node, so on the path item it never names the node's own language.
+const NEUTRAL_LANGCODES = new Set(["und", "zxx"]);
+
+// The node's language from the serialized read. The live drupal/mcp_tools
+// serializer prints NO `langcode` key (neither top level nor in `fields`); its
+// only language value is the computed `path` field item's `langcode`, which
+// Drupal core sets to the language of the serialized translation itself (the
+// same translation the title and body come from), or to a neutral code when a
+// language-neutral alias exists. Order:
+// 1. a `langcode` the read itself carries (in `fields`, else top level) wins;
+//    when that value is not a safe code nothing is derived (fail-closed);
+// 2. otherwise the path items' one shared, safe, non-neutral `langcode`;
+// 3. otherwise none: the protected draft then refuses before any module call.
+// Never the site default. The module's protected read refuses a language the
+// node has no translation in, so a wrong code cannot reach a write.
+function nodeLangcode(entity: McpJsonApiEntity, fields: Record<string, unknown>): string | undefined {
+  const own = fields.langcode ?? (entity as { langcode?: unknown }).langcode;
+  if (own !== undefined && own !== null) {
+    return typeof own === "string" && LANGCODE.test(own) ? own : undefined;
+  }
+  const items = Array.isArray(fields.path) ? fields.path : [];
+  const codes = new Set<unknown>(
+    items.map((item) => (item && typeof item === "object" ? (item as { langcode?: unknown }).langcode : undefined)),
+  );
+  if (codes.size !== 1) return undefined;
+  const [code] = [...codes];
+  return typeof code === "string" && LANGCODE.test(code) && !NEUTRAL_LANGCODES.has(code) ? code : undefined;
+}
+
 function flattenMcpNode(entity: McpJsonApiEntity): Record<string, unknown> {
   const fields =
     entity.fields && typeof entity.fields === "object" ? entity.fields : {};
   const idNum = Number(entity.id);
+  const langcode = nodeLangcode(entity, fields);
   // Spread the module's flattened field map first, then overwrite the editable
   // before-values with normalized top-level forms so a compound field value can
   // never clobber the `title`/`body` strings the diff reads.
@@ -260,6 +295,9 @@ function flattenMcpNode(entity: McpJsonApiEntity): Record<string, unknown> {
     body: typeof fields.body === "string" ? fields.body : "",
     summary: "",
     status: entity.status,
+    // Only a derived code is set: a read that carries its own unsafe
+    // `langcode` keeps it as-is above, and the draft write refuses it.
+    ...(langcode !== undefined ? { langcode } : {}),
   };
 }
 
