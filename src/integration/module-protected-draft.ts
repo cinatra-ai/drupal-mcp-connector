@@ -146,6 +146,38 @@ export function prepareModuleDraft(value: unknown, expected: ModuleDraftIdentity
   };
 }
 
+export type ModuleNodeRead = {
+  node_id: number; uuid: string; language: string; is_published: boolean;
+  default_revision_id: number; fields: StoredFieldItems; available_fields: string[];
+};
+
+/** Validate one module preimage used as a plain node read (no draft binding).
+ * It requires the requested node, a UUID, a safe language (the given one when
+ * the call named it), a boolean published status, exactly the requested stored
+ * fields and a non-empty `available_fields` array of unique canonical editable
+ * names. The caller reads the node's fields from that list, so a missing,
+ * empty or malformed list, or any invalid entry, refuses the read (never
+ * repaired). */
+export function readModuleNode(value: unknown, nid: number, requested: string[], language?: string): ModuleNodeRead {
+  const result = payload(value);
+  if (result.node_id !== nid || typeof result.uuid !== "string" || result.uuid === ""
+    || typeof result.language !== "string" || !/^[a-zA-Z0-9_-]+$/.test(result.language)
+    || (language !== undefined && result.language !== language)
+    || typeof result.is_published !== "boolean" || !positiveInteger(result.default_revision_id)) {
+    refusal("the module reader did not return the requested node identity.");
+  }
+  const available = result.available_fields;
+  if (!Array.isArray(available) || available.length === 0 || new Set(available).size !== available.length
+    || !available.every((field) => typeof field === "string" && /^[a-z][a-z0-9_]*$/.test(field) && !protectedFields.has(field))) {
+    refusal("the module reader did not report a valid list of the node's editable fields.");
+  }
+  return {
+    node_id: nid, uuid: result.uuid, language: result.language, is_published: result.is_published,
+    default_revision_id: result.default_revision_id, fields: storedFields(result.fields, requested),
+    available_fields: [...available] as string[],
+  };
+}
+
 /** Preserve stored format/summary and never guess an empty field's schema. */
 export function structureModuleUpdates(fields: Record<string, unknown>, before: StoredFieldItems): StoredFieldItems {
   const updates: StoredFieldItems = {};

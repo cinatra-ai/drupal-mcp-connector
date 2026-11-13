@@ -8,7 +8,7 @@ import type { ExtensionPrimitiveRequest } from "@cinatra-ai/sdk-extensions";
 import { callDrupalMcp } from "../lib/drupal-mcp-client";
 import { nodePublishedStatus } from "../integration/protected-draft";
 import {
-  MODULE_READ_REVISION, MODULE_WRITE_DRAFT, prepareModuleDraft,
+  MODULE_READ_REVISION, MODULE_WRITE_DRAFT, prepareModuleDraft, readModuleNode,
   structureModuleUpdates, verifyModuleRevision,
   reportedModuleRevisionId, stableStringify, DRUPAL_SYSTEM_FIELD_PATHS,
   type ModuleDraftIdentity, type ModuleDraftPlan,
@@ -356,13 +356,68 @@ async function readNodeViaMcp(
 }
 
 // ---------------------------------------------------------------------------
+// Full-field read through the Cinatra Drupal module reader.
+//
+// A Cinatra development Drupal site serves exactly two tools on its endpoint:
+// cinatra_read_protected_revision and cinatra_write_protected_draft. The
+// generic read tools are not served there, so the generic read throws. The
+// module reader then reads the published default revision: the first call
+// names no language, so the module binds the node's original (untranslated)
+// language and reports it with the node's editable field names; a second call
+// binds that language and reads every one of those fields. When the module
+// reports `title` as the only editable field, the first call already holds it
+// and the second call is skipped. A missing, empty or malformed field list
+// refuses the read, and so does a second call that reports another UUID,
+// default revision or set of editable field names than the first. A
+// module without that contract refuses the first call, and the caller keeps
+// its existing fallback or refusal.
+// ---------------------------------------------------------------------------
+async function readNodeViaModule(
+  instance: DrupalMcpInstance,
+  nid: number,
+): Promise<Record<string, unknown>> {
+  const first = readModuleNode(
+    await callDrupalMcp(instance, MODULE_READ_REVISION, { nid, fields: ["title"] }),
+    nid, ["title"],
+  );
+  const names = [...new Set(["title", ...first.available_fields])].sort();
+  const full = names.length === 1 ? first : readModuleNode(
+    await callDrupalMcp(instance, MODULE_READ_REVISION, { nid, language: first.language, fields: names }),
+    nid, names, first.language,
+  );
+  if (full.uuid !== first.uuid || full.default_revision_id !== first.default_revision_id
+    || stableStringify([...full.available_fields].sort()) !== stableStringify([...first.available_fields].sort())) {
+    throw new Error("The page changed between the module reads; read it again.");
+  }
+  const value = (name: string, key: string): string => {
+    const item = full.fields[name]?.[0];
+    return typeof item?.[key] === "string" ? item[key] as string : "";
+  };
+  const flat = Object.fromEntries(Object.entries(full.fields).map(([name, items]) => [
+    name, items.length === 1 && Object.hasOwn(items[0], "value") ? items[0].value : items,
+  ]));
+  return {
+    ...flat,
+    id: String(nid),
+    nid,
+    uuid: full.uuid,
+    title: value("title", "value"),
+    body: value("body", "value"),
+    summary: value("body", "summary"),
+    status: full.is_published,
+    langcode: full.language,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // The current-node read of the write guards.
 // ---------------------------------------------------------------------------
 
-/** Full-field current-node read (`mcp_jsonapi_list_entities`) for the write
- * guards: the update's status guard and the protected draft's identity read.
- * Never the `mcp_tools_get_recent_content` summary fallback `drupal_node_get`
- * degrades to. Returns null on absence OR unavailability; each caller then
+/** Full-field current-node read (`mcp_jsonapi_list_entities`) for the
+ * update's status guard. Never the module reader: a generic update needs the
+ * generic read, and the module fallback must not authorize an update. Never
+ * the `mcp_tools_get_recent_content` summary fallback `drupal_node_get`
+ * degrades to. Returns null on absence OR unavailability; the caller then
  * refuses its write (fail-closed). */
 async function readCurrentNode(
   instance: DrupalMcpInstance,
@@ -370,6 +425,26 @@ async function readCurrentNode(
 ): Promise<Record<string, unknown> | null> {
   try {
     return await readNodeViaMcp(instance, nid);
+  } catch {
+    return null;
+  }
+}
+
+/** The protected draft's identity read: the generic full-field read, else the
+ * Cinatra module reader when the generic read throws (an endpoint that serves
+ * only the module tools). The draft is then bound again to the module's own
+ * preimage. Returns null on absence OR unavailability; the caller refuses. */
+async function readCurrentNodeForDraft(
+  instance: DrupalMcpInstance,
+  nid: number,
+): Promise<Record<string, unknown> | null> {
+  try {
+    return await readNodeViaMcp(instance, nid);
+  } catch {
+    // The generic read is unavailable (for example not served); try the module.
+  }
+  try {
+    return await readNodeViaModule(instance, nid);
   } catch {
     return null;
   }
@@ -414,8 +489,15 @@ export function createDrupalPrimitiveHandlers() {
         // lookup, which also covers nodes the MCP read's access policy hides.
       } catch {
         // MCP jsonapi read unavailable (mcp_tools_jsonapi disabled / restricted
-        // / transient). Fall back to the recent-content summary so the read
-        // never hard-fails on a healthy site.
+        // / transient / not served). Read through the Cinatra module reader
+        // (an endpoint that serves only the module tools), then fall back to
+        // the recent-content summary so the read never hard-fails on a healthy
+        // site.
+        try {
+          return await readNodeViaModule(instance, nid);
+        } catch {
+          // The module reader is unavailable too; use the summary fallback.
+        }
       }
 
       // FALLBACK — recent-content summary lookup (transient MCP-read
@@ -505,7 +587,7 @@ export function createDrupalPrimitiveHandlers() {
       if (!Number.isSafeInteger(nid) || Object.keys(fields).some((name) => DRUPAL_SYSTEM_FIELD_PATHS.includes(name))) {
         throw new Error("Protected draft unavailable: a safe node identity and reviewable content fields are required.");
       }
-      const current = await readCurrentNode(instance, nid);
+      const current = await readCurrentNodeForDraft(instance, nid);
       if (!current || current.nid !== nid || current.id !== String(nid)
         || nodePublishedStatus(current.status) !== true || typeof current.uuid !== "string" || !current.uuid) {
         throw new Error("Protected draft unavailable: the actual published node identity could not be read.");

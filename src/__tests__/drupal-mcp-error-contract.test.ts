@@ -141,9 +141,12 @@ describe("drupal_node_get — fail-SOFT fallback to the recent-content summary",
       } as never);
 
       expect(node).toMatchObject({ id: 5 });
-      // The EXACT sequence: the full-field read, then the summary fallback.
+      // The EXACT sequence: the full-field read, then the Cinatra module reader
+      // (an endpoint that serves only the module tools), which answers no
+      // module contract here, then the summary fallback.
       expect(vi.mocked(callDrupalMcp).mock.calls.map((c) => c[1])).toEqual([
         "mcp_jsonapi_list_entities",
+        "cinatra_read_protected_revision",
         "mcp_tools_get_recent_content",
       ]);
     },

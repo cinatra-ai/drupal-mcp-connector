@@ -14,7 +14,7 @@ The Cinatra primitive names (what the LLM calls) map to `drupal/mcp_tools` tool 
 |---|---|---|
 | `drupal_status` | — | Local status check, no MCP call |
 | `drupal_instances_list` | — | Reads from DB; returns rows verbatim; credentials live only in the Nango vault and are resolved at call time |
-| `drupal_node_get` | `mcp_tools_get_recent_content` | **No get-by-ID tool exists** — pulls the recent-content list and finds the node by `id` / `nid`; `mcp_tools_search_content` requires ≥3-char queries and does not support nid-specific lookup |
+| `drupal_node_get` | `mcp_jsonapi_list_entities`; `cinatra_read_protected_revision` only when that call throws; `mcp_tools_get_recent_content` when that call returns no node or the module read fails too | The module reader serves an endpoint that lists only the Cinatra module tools; it is not tried when the generic read answers without the node. **No get-by-ID tool exists** — pulls the recent-content list and finds the node by `id` / `nid`; `mcp_tools_search_content` requires ≥3-char queries and does not support nid-specific lookup |
 | `drupal_node_update` | `mcp_update_content` | `nid` sent as a string (PHP `strtolower()` type fix); maps `fields` input → `updates` arg |
 | `drupal_node_create_draft_revision` | `cinatra_read_protected_revision` + `cinatra_write_protected_draft` in the existing Cinatra module | SAME nodeId + fields + optional exact language; atomic draft and independent exact-revision readback |
 | `drupal_node_list` | `mcp_tools_get_recent_content` | Returns `{ total, sorted_by, content: [...] }`; the handler unwraps the `content` array |
