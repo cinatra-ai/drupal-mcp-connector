@@ -363,9 +363,12 @@ async function readNodeViaMcp(
 // generic read tools are not served there, so the generic read throws. The
 // module reader then reads the published default revision: the first call
 // names no language, so the module binds the node's original (untranslated)
-// language and reports it; the second call binds that language and reads every
-// readable editable field. A module without that contract refuses the first
-// call, and the caller keeps its existing fallback or refusal.
+// language and reports it with the node's editable field names; a second call
+// binds that language and reads every one of those fields. When the module
+// reports `title` as the only editable field, the first call already holds it
+// and the second call is skipped. A malformed field list refuses the read. A
+// module without that contract refuses the first call, and the caller keeps
+// its existing fallback or refusal.
 // ---------------------------------------------------------------------------
 async function readNodeViaModule(
   instance: DrupalMcpInstance,
@@ -407,13 +410,28 @@ async function readNodeViaModule(
 // The current-node read of the write guards.
 // ---------------------------------------------------------------------------
 
-/** Full-field current-node read (`mcp_jsonapi_list_entities`, else the
- * Cinatra module reader when the generic read is unavailable) for the write
- * guards: the update's status guard and the protected draft's identity read.
- * Never the `mcp_tools_get_recent_content` summary fallback `drupal_node_get`
- * degrades to. Returns null on absence OR unavailability; each caller then
+/** Full-field current-node read (`mcp_jsonapi_list_entities`) for the
+ * update's status guard. Never the module reader: a generic update needs the
+ * generic read, and the module fallback must not authorize an update. Never
+ * the `mcp_tools_get_recent_content` summary fallback `drupal_node_get`
+ * degrades to. Returns null on absence OR unavailability; the caller then
  * refuses its write (fail-closed). */
 async function readCurrentNode(
+  instance: DrupalMcpInstance,
+  nid: number,
+): Promise<Record<string, unknown> | null> {
+  try {
+    return await readNodeViaMcp(instance, nid);
+  } catch {
+    return null;
+  }
+}
+
+/** The protected draft's identity read: the generic full-field read, else the
+ * Cinatra module reader when the generic read throws (an endpoint that serves
+ * only the module tools). The draft is then bound again to the module's own
+ * preimage. Returns null on absence OR unavailability; the caller refuses. */
+async function readCurrentNodeForDraft(
   instance: DrupalMcpInstance,
   nid: number,
 ): Promise<Record<string, unknown> | null> {
@@ -566,7 +584,7 @@ export function createDrupalPrimitiveHandlers() {
       if (!Number.isSafeInteger(nid) || Object.keys(fields).some((name) => DRUPAL_SYSTEM_FIELD_PATHS.includes(name))) {
         throw new Error("Protected draft unavailable: a safe node identity and reviewable content fields are required.");
       }
-      const current = await readCurrentNode(instance, nid);
+      const current = await readCurrentNodeForDraft(instance, nid);
       if (!current || current.nid !== nid || current.id !== String(nid)
         || nodePublishedStatus(current.status) !== true || typeof current.uuid !== "string" || !current.uuid) {
         throw new Error("Protected draft unavailable: the actual published node identity could not be read.");

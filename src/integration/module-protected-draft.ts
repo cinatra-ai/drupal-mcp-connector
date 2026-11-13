@@ -153,9 +153,10 @@ export type ModuleNodeRead = {
 
 /** Validate one module preimage used as a plain node read (no draft binding).
  * It requires the requested node, a UUID, a safe language (the given one when
- * the call named it), a boolean published status and exactly the requested
- * stored fields. Reported field names that are not canonical editable names
- * are dropped. */
+ * the call named it), a boolean published status, exactly the requested stored
+ * fields and an `available_fields` array of unique canonical editable names.
+ * The caller reads the node's fields from that list, so a missing or malformed
+ * list, or any invalid entry, refuses the read (never repaired). */
 export function readModuleNode(value: unknown, nid: number, requested: string[], language?: string): ModuleNodeRead {
   const result = payload(value);
   if (result.node_id !== nid || typeof result.uuid !== "string" || result.uuid === ""
@@ -164,13 +165,15 @@ export function readModuleNode(value: unknown, nid: number, requested: string[],
     || typeof result.is_published !== "boolean" || !positiveInteger(result.default_revision_id)) {
     refusal("the module reader did not return the requested node identity.");
   }
-  const available = Array.isArray(result.available_fields)
-    ? result.available_fields.filter((field): field is string => typeof field === "string" && /^[a-z][a-z0-9_]*$/.test(field) && !protectedFields.has(field))
-    : [];
+  const available = result.available_fields;
+  if (!Array.isArray(available) || new Set(available).size !== available.length
+    || !available.every((field) => typeof field === "string" && /^[a-z][a-z0-9_]*$/.test(field) && !protectedFields.has(field))) {
+    refusal("the module reader did not report a valid list of the node's editable fields.");
+  }
   return {
     node_id: nid, uuid: result.uuid, language: result.language, is_published: result.is_published,
     default_revision_id: result.default_revision_id, fields: storedFields(result.fields, requested),
-    available_fields: [...new Set(available)],
+    available_fields: [...available] as string[],
   };
 }
 

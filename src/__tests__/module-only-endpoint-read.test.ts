@@ -2,8 +2,10 @@
 // endpoint: cinatra_read_protected_revision and cinatra_write_protected_draft.
 // The generic mcp_tools read tools are not served there. These tests require
 // that drupal_node_get and the protected draft's identity read use the module
-// reader on such an endpoint, and that a site which serves the generic read
-// keeps it as the primary read.
+// reader on such an endpoint, that a malformed module field list refuses the
+// read, that drupal_node_update never takes the module read as its status
+// read, and that a site which serves the generic read keeps it as the primary
+// read.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../lib/drupal-mcp-client", () => ({ callDrupalMcp: vi.fn() }));
 import { callDrupalMcp } from "../lib/drupal-mcp-client";
@@ -68,7 +70,17 @@ function moduleOnlyEndpoint() {
   });
 }
 
+// Rewrite the module reader's result; every other tool keeps the endpoint above.
+function readerResult(change: (result: Record<string, unknown>, args: Record<string, unknown>) => Record<string, unknown>) {
+  const base = vi.mocked(callDrupalMcp).getMockImplementation()!;
+  vi.mocked(callDrupalMcp).mockImplementation(async (i, tool, raw) => {
+    const value = await base(i, tool, raw) as { result: Record<string, unknown> };
+    return tool === READER ? envelope(change(value.result, raw as Record<string, unknown>)) : value;
+  });
+}
+
 const tools = () => vi.mocked(callDrupalMcp).mock.calls.map((c) => c[1]);
+const readerCalls = () => vi.mocked(callDrupalMcp).mock.calls.filter((c) => c[1] === READER);
 const writes = () => vi.mocked(callDrupalMcp).mock.calls.filter((c) => [WRITER, "mcp_update_content", "mcp_publish_content"].includes(c[1]));
 
 beforeEach(() => { vi.clearAllMocks(); authority.mockResolvedValue(undefined); deps(); moduleOnlyEndpoint(); });
@@ -96,16 +108,54 @@ describe("an endpoint that serves only the Cinatra module tools", () => {
   it("refuses the draft when the module reader also fails", async () => {
     vi.mocked(callDrupalMcp).mockRejectedValue(new Error("Unknown tool"));
     await expect(createDrupalPrimitiveHandlers().drupal_node_create_draft_revision({ input: { instanceId: "site", nodeId: "7", fields: { title: "Changed" } } } as never)).rejects.toThrow(/published node identity/i);
+    // The identity read tried the module reader before it refused.
+    expect(readerCalls()[0]?.[2]).toEqual({ nid: 7, fields: ["title"] });
     expect(writes()).toHaveLength(0);
   });
 
-  it("refuses a module read that names another node", async () => {
+  it("refuses the draft when the identity read names another node", async () => {
+    // Only the identity read (no language) names node 8. The language-bound
+    // reads name node 7, so only the identity check of that read refuses.
+    readerResult((result, args) => args.language === undefined ? { ...result, node_id: 8 } : result);
+    await expect(createDrupalPrimitiveHandlers().drupal_node_create_draft_revision({ input: { instanceId: "site", nodeId: "7", fields: { title: "Changed" } } } as never)).rejects.toThrow(/published node identity/i);
+    expect(readerCalls()).toHaveLength(1);
+    expect(writes()).toHaveLength(0);
+  });
+
+  it("refuses a module read without a field list and falls back to the summary", async () => {
+    readerResult((result) => ({ ...result, available_fields: null }));
+    await expect(createDrupalPrimitiveHandlers().drupal_node_get({ input: { instanceId: "site", nodeId: "7" } } as never)).rejects.toThrow(/mcp_tools_get_recent_content/);
+    expect(readerCalls()).toHaveLength(1);
+    expect(tools()).toContain(GENERIC_LIST);
+  });
+
+  it("refuses a module read whose field list holds an invalid entry and falls back to the summary", async () => {
+    readerResult((result) => ({ ...result, available_fields: ["body", "title", 42] }));
+    await expect(createDrupalPrimitiveHandlers().drupal_node_get({ input: { instanceId: "site", nodeId: "7" } } as never)).rejects.toThrow(/mcp_tools_get_recent_content/);
+    expect(readerCalls()).toHaveLength(1);
+    expect(tools()).toContain(GENERIC_LIST);
+  });
+
+  it("skips the language-bound read when title is the only editable field", async () => {
+    readerResult((result) => ({ ...result, available_fields: ["title"] }));
+    const node = await createDrupalPrimitiveHandlers().drupal_node_get({ input: { instanceId: "site", nodeId: "7" } } as never) as Record<string, unknown>;
+    expect(node).toMatchObject({ id: "7", nid: 7, uuid: "uuid-7", langcode: "de", status: true, title: "Live title", body: "", summary: "" });
+    expect(readerCalls().map((c) => c[2])).toEqual([{ nid: 7, fields: ["title"] }]);
+    expect(tools()).not.toContain(GENERIC_LIST);
+  });
+
+  it("drupal_node_update refuses when only the module reader can read the node", async () => {
+    // The module reads would succeed and report an unpublished node, and the
+    // generic update tool is served. The update's status guard reads only
+    // through the generic read, so the update is refused.
     const base = vi.mocked(callDrupalMcp).getMockImplementation()!;
     vi.mocked(callDrupalMcp).mockImplementation(async (i, tool, raw) => {
+      if (tool === "mcp_update_content") return { success: true };
       const value = await base(i, tool, raw) as { result: Record<string, unknown> };
-      return tool === READER ? envelope({ ...value.result, node_id: 8 }) : value;
+      return tool === READER ? envelope({ ...value.result, is_published: false }) : value;
     });
-    await expect(createDrupalPrimitiveHandlers().drupal_node_create_draft_revision({ input: { instanceId: "site", nodeId: "7", fields: { title: "Changed" } } } as never)).rejects.toThrow(/identity/i);
+    await expect(createDrupalPrimitiveHandlers().drupal_node_update({ input: { instanceId: "site", nodeId: "7", fields: { title: "Changed" } } } as never)).rejects.toThrow("Cannot establish current node status (read unavailable or unsupported); refusing a content update.");
+    expect(tools()).toEqual([GENERIC_READ]);
     expect(writes()).toHaveLength(0);
   });
 });
