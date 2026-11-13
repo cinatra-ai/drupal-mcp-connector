@@ -110,14 +110,20 @@ export const DRUPAL_MCP_VERSION_NEGOTIATION: VersionNegotiationOptions = { mode:
 // Every consumer of a `callDrupalMcp` rejection was audited before the package
 // changed, because the fail-open direction here is a content-write gate:
 //
-//   - `handlers.ts` `readCurrentNode` / `readCurrentNodeForDraft` — bare
-//     `catch {}` -> `null`, and a null current read is FAIL-CLOSED in the
-//     update's status guard and in the protected draft's identity read (the
-//     write is REFUSED, not passed).
-//     Class-agnostic; the fail-closed direction is locked by a test in this
+//   - `handlers.ts` `readCurrentNode` — bare `catch {}` -> `null`, and a null
+//     current read is FAIL-CLOSED in the update's status guard (the write is
+//     REFUSED, not passed). It never uses the module reader.
+//   - `handlers.ts` `readCurrentNodeForDraft` — bare `catch {}` around the
+//     generic read, then the Cinatra module reader; only when that also
+//     throws does it return `null`, which FAIL-CLOSES the protected draft's
+//     identity read. A module read that succeeds returns that node, and the
+//     draft is then bound again to the module's own language-bound preimage
+//     before any write.
+//     Class-agnostic; the fail-closed direction is locked by tests in this
 //     package.
 //   - `handlers.ts` `drupal_node_get` — bare `catch {}` around the full-field
-//     MCP read, falling back to the recent-content summary. Class-agnostic.
+//     MCP read, then the Cinatra module reader, then (bare `catch {}`) the
+//     recent-content summary. Class-agnostic.
 //   - `mcp/toolbox.ts` — `err instanceof Error ? err.message : String(err)` for
 //     one `console.warn`. Message TEXT only, no prefix parsing.
 //   - No other in-package catch touches this path, and NOTHING host-side

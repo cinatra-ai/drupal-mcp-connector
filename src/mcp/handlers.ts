@@ -366,7 +366,9 @@ async function readNodeViaMcp(
 // language and reports it with the node's editable field names; a second call
 // binds that language and reads every one of those fields. When the module
 // reports `title` as the only editable field, the first call already holds it
-// and the second call is skipped. A malformed field list refuses the read. A
+// and the second call is skipped. A missing, empty or malformed field list
+// refuses the read, and so does a second call that reports another UUID,
+// default revision or set of editable field names than the first. A
 // module without that contract refuses the first call, and the caller keeps
 // its existing fallback or refusal.
 // ---------------------------------------------------------------------------
@@ -383,7 +385,8 @@ async function readNodeViaModule(
     await callDrupalMcp(instance, MODULE_READ_REVISION, { nid, language: first.language, fields: names }),
     nid, names, first.language,
   );
-  if (full.uuid !== first.uuid || full.default_revision_id !== first.default_revision_id) {
+  if (full.uuid !== first.uuid || full.default_revision_id !== first.default_revision_id
+    || stableStringify([...full.available_fields].sort()) !== stableStringify([...first.available_fields].sort())) {
     throw new Error("The page changed between the module reads; read it again.");
   }
   const value = (name: string, key: string): string => {

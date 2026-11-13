@@ -136,6 +136,25 @@ describe("an endpoint that serves only the Cinatra module tools", () => {
     expect(tools()).toContain(GENERIC_LIST);
   });
 
+  it("refuses a module read whose field list is empty and falls back to the summary", async () => {
+    readerResult((result) => ({ ...result, available_fields: [] }));
+    await expect(createDrupalPrimitiveHandlers().drupal_node_get({ input: { instanceId: "site", nodeId: "7" } } as never)).rejects.toThrow(/mcp_tools_get_recent_content/);
+    expect(readerCalls()).toHaveLength(1);
+    expect(tools()).toContain(GENERIC_LIST);
+  });
+
+  it.each([
+    ["the field list", { available_fields: ["body", "field_deck", "title"] }],
+    ["the UUID", { uuid: "uuid-other" }],
+    ["the default revision", { default_revision_id: 12 }],
+  ])("refuses the read when %s changes between the module reads and falls back to the summary", async (_name, change) => {
+    // Only the language-bound (second) read reports the change.
+    readerResult((result, args) => args.language === undefined ? result : { ...result, ...change });
+    await expect(createDrupalPrimitiveHandlers().drupal_node_get({ input: { instanceId: "site", nodeId: "7" } } as never)).rejects.toThrow(/mcp_tools_get_recent_content/);
+    expect(readerCalls()).toHaveLength(2);
+    expect(tools()).toContain(GENERIC_LIST);
+  });
+
   it("skips the language-bound read when title is the only editable field", async () => {
     readerResult((result) => ({ ...result, available_fields: ["title"] }));
     const node = await createDrupalPrimitiveHandlers().drupal_node_get({ input: { instanceId: "site", nodeId: "7" } } as never) as Record<string, unknown>;
