@@ -37,15 +37,16 @@ A flow edits a page without a model: `drupal_node_read_for_edit` reads it, a per
 
   | Code | Cause |
   |---|---|
-  | `node_changed` | the module's changed revision, changed time, workflow, values or publication refusals; a pending revision when the read had none |
+  | `node_changed` | the module's changed revision, changed time, workflow, values or publication refusals; a pending revision when the read had none; on a bound draft also the connector's own reads showing the page unpublished, a new pending revision, content changed between its reads, or a changed `expectedFields` |
   | `pending_revision` | a pending revision that already existed at the read |
   | `permission_denied` | the module's edit, publish, workflow-state, field-access or MCP-permission refusals |
-  | `invalid_input` | the module's request-shape, unknown-field, invalid-value or text-format refusals; a scalar edit the stored structure cannot take |
-  | `refused` | any other module refusal text |
+  | `invalid_input` | the module's request-shape, unknown-field, invalid-value or text-format refusals; a scalar edit the stored structure cannot take; no non-empty field, a system field, or an unknown instance |
+  | `refused` | any other module refusal text; a bound draft the module read does not allow (not moderated, no single draft state) |
   | `write_unverified` | a failure that is not a module refusal, the module's "inspect before retrying" failures, or a result that is not the expected stored revision |
+  | `permission_denied` (connector) | the host's write-authority gate denied the person |
   | `invalid_binding`, `wrong_page_state`, `module_capability_missing`, `read_unavailable` | connector checks before any write |
 
-  On the protected draft an unverified failure keeps the existing "inspection required" message.
+  On a bound path every exit before the write answers with one of these codes; without a binding each keeps its existing message. On the protected draft an unverified failure keeps the existing "inspection required" message.
 - `PASSTHROUGH_STEPS` in `src/mcp/registry.ts` declares `passthroughStep: "read"` on `drupal_node_read_for_edit` and `"publishing"` on the three write tools. A host that reads the field serves a "read" tool to a verified flow step with no person's decision (only on a registration with no `outward`), and a "publishing" tool only to a publishing step whose card a person released. Never declare "read" on a tool that can reach a write.
 
 ## Key implementation invariants

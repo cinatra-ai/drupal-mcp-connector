@@ -72,6 +72,18 @@ export const REFUSAL = {
     "The site refused the field values or the request. Nothing was written."),
   structureUnavailable: () => new DrupalEditRefusal("read_unavailable",
     "The stored structure of the requested fields could not be read through the Cinatra module reader. Nothing was written."),
+  pageUnreadable: () => new DrupalEditRefusal("read_unavailable",
+    "The current page could not be read through the site's MCP tools. Nothing was written."),
+  noFields: () => new DrupalEditRefusal("invalid_input",
+    "No non-empty field values were given. Nothing was written."),
+  systemField: () => new DrupalEditRefusal("invalid_input",
+    "Identity and system fields cannot be edited. Nothing was written."),
+  instanceNotFound: () => new DrupalEditRefusal("invalid_input",
+    "The Drupal instance was not found. Nothing was written."),
+  authorityDenied: () => new DrupalEditRefusal("permission_denied",
+    "The person may not write to this Drupal instance. Nothing was written."),
+  draftNotPossible: () => new DrupalEditRefusal("refused",
+    "The site's protected draft read does not allow a draft of this page (for example it is not moderated or no single unpublished draft state is permitted). Nothing was written."),
   refused: () => new DrupalEditRefusal("refused",
     "The site refused the write. Read the page again before retrying."),
   writeUnverified: () => new DrupalEditRefusal("write_unverified",
@@ -277,4 +289,21 @@ export function verifyUnpublishedWrite(value: unknown, binding: EditBinding, req
     throw REFUSAL.writeUnverified();
   }
   return { revision_id: result.revision_id, published: publish, changed: result.changed, fields: fields as Record<string, Record<string, unknown>[]> };
+}
+
+/** On a bound protected draft, the connector's own module read answers a page
+ * state the draft cannot start from with a coded refusal decided against the
+ * binding: an unpublished page, or a pending revision (one created after the
+ * read is a change; one the read already had is `pending_revision`). Returns
+ * null when the read shows neither. */
+export function boundDraftReadRefusal(value: unknown, binding: EditBinding): DrupalEditRefusal | null {
+  const result = plainObject(plainObject(value)?.result);
+  if (!result) return null;
+  if (result.is_published === false) return REFUSAL.nodeChanged();
+  if (positive(result.latest_revision_id) && positive(result.default_revision_id)
+    && result.latest_revision_id !== result.default_revision_id) {
+    return binding.expected_latest_revision_id === binding.expected_default_revision_id
+      ? REFUSAL.nodeChanged() : REFUSAL.pendingRevision();
+  }
+  return null;
 }

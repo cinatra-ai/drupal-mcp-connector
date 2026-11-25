@@ -215,6 +215,32 @@ describe("drupal_node_update with expectedBinding", () => {
     expect(callDrupalMcp).not.toHaveBeenCalled();
   });
 
+  it.each<[string, string, Record<string, unknown>]>([
+    ["drupal_node_update", "only empty values", { fields: { title: "" } }],
+    ["drupal_node_update", "an empty field map", { fields: {} }],
+    ["drupal_node_publish", "only empty values", { fields: { title: "" } }],
+  ])("%s refuses %s with invalid_input on the bound path", async (tool, _name, extra) => {
+    expect(await failure(call(tool as never, { instanceId: "site", nodeId: "7", expectedBinding: binding, ...extra }))).toMatch(/^invalid_input: /);
+    expect(writes()).toHaveLength(0);
+  });
+
+  it.each(["drupal_node_update", "drupal_node_publish", "drupal_node_create_draft_revision"])("%s answers a denied write authority with permission_denied on the bound path", async (tool) => {
+    authority.mockRejectedValue(new Error("not authorized"));
+    const b = tool === "drupal_node_create_draft_revision" ? publishedBinding : binding;
+    expect(await failure(call(tool as never, { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: b }))).toMatch(/^permission_denied: /);
+    expect(callDrupalMcp).not.toHaveBeenCalled();
+  });
+
+  it.each(["drupal_node_update", "drupal_node_publish"])("%s answers an unknown instance with invalid_input on the bound path", async (tool) => {
+    expect(await failure(call(tool as never, { instanceId: "other", nodeId: "7", fields: { title: "New" }, expectedBinding: binding }))).toMatch(/^invalid_input: /);
+    expect(callDrupalMcp).not.toHaveBeenCalled();
+  });
+
+  it("keeps the existing authority message without a binding", async () => {
+    authority.mockRejectedValue(new Error("not authorized"));
+    expect(await failure(call("drupal_node_publish", { instanceId: "site", nodeId: "7" }))).toBe("not authorized");
+  });
+
   it("refuses publish on drupal_node_update: publishing goes through drupal_node_publish", async () => {
     await expect(call("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: binding, publish: true })).rejects.toThrow();
     expect(callDrupalMcp).not.toHaveBeenCalled();
@@ -255,14 +281,61 @@ describe("drupal_node_publish with expectedBinding", () => {
 
 describe("drupal_node_create_draft_revision with expectedBinding", () => {
   const READ = "mcp_jsonapi_list_entities";
-  function routeDraft(o: Route = {}) {
-    route({ read: { ...publishedRead, preimage_fingerprint: "d".repeat(64), workflow_fingerprint: "b".repeat(64), ...o.read }, ...o });
+  function routeDraft(o: Route & { genericStatus?: boolean; readerThrows?: string } = {}) {
+    route({ ...o, read: { ...publishedRead, preimage_fingerprint: "d".repeat(64), workflow_fingerprint: "b".repeat(64), ...o.read } });
     const inner = vi.mocked(callDrupalMcp).getMockImplementation()!;
     vi.mocked(callDrupalMcp).mockImplementation(async (i, tool, args) => {
-      if (tool === READ) return { items: [{ entity_type: "node", id: 7, uuid: "uuid-7", bundle: "article", status: true, fields: { nid: 7, langcode: "de", title: "Old", body: "Old body" } }] };
+      if (tool === READ) return { items: [{ entity_type: "node", id: 7, uuid: "uuid-7", bundle: "article", status: o.genericStatus ?? true, fields: { nid: 7, langcode: "de", title: "Old", body: "Old body" } }] };
+      if (tool === READER && o.readerThrows !== undefined) throw new Error(o.readerThrows);
       return inner(i, tool, args);
     });
   }
+  const draft = (extra: Record<string, unknown> = {}, b: EditBinding = publishedBinding) =>
+    call("drupal_node_create_draft_revision", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: b, ...extra });
+
+  // Every exit of the bound draft before its writer answers with a coded
+  // refusal a flow can branch on, decided against the binding.
+  it.each<[string, Parameters<typeof routeDraft>[0], EditBinding, string]>([
+    ["a pending revision created after the read", { read: { latest_revision_id: 11 } }, publishedBinding, "node_changed"],
+    ["a pending revision that already existed at the read", { read: { latest_revision_id: 11 } }, { ...publishedBinding, expected_latest_revision_id: 11 }, "pending_revision"],
+    ["a module read that reports the page unpublished", { read: { is_published: false } }, publishedBinding, "node_changed"],
+    ["a generic read that reports the page unpublished", { genericStatus: false }, publishedBinding, "node_changed"],
+    ["content that changed between the connector's two reads", { secondRead: { preimage_fingerprint: "e".repeat(64) } }, publishedBinding, "node_changed"],
+    ["an unmoderated page", { read: { moderated: false } }, publishedBinding, "refused"],
+    ["a module reader refusal", { readerThrows: `Drupal ${READER} returned failure: The exact published preimage is not readable in this language.` }, publishedBinding, "refused"],
+    ["a module reader permission refusal", { readerThrows: `Drupal ${READER} returned failure: The existing MCP content integration and its read/write permissions are required.` }, publishedBinding, "permission_denied"],
+    ["an unreachable module reader", { readerThrows: "fetch failed: Secret page words" }, publishedBinding, "read_unavailable"],
+  ])("refuses %s before the writer with a coded refusal", async (_name, o, b, code) => {
+    routeDraft(o);
+    const message = await failure(draft({}, b));
+    expect(message.startsWith(`${code}: `)).toBe(true);
+    expect(message).not.toContain("Secret page words");
+    expect(writes()).toHaveLength(0);
+  });
+
+  it("refuses an earlier read's changed expectedFields with node_changed", async () => {
+    routeDraft();
+    expect(await failure(draft({ expectedFields: { title: "Other" } }))).toMatch(/^node_changed: /);
+    expect(writes()).toHaveLength(0);
+  });
+
+  it("refuses a scalar edit of a multi-valued field with invalid_input", async () => {
+    routeDraft({ fields: { ...before, title: [{ value: "A" }, { value: "B" }] } });
+    expect(await failure(draft())).toMatch(/^invalid_input: /);
+    expect(writes()).toHaveLength(0);
+  });
+
+  it.each<[string, Record<string, unknown>]>([["only empty values", { fields: { title: "" } }], ["a system field", { fields: { path: "/x" } }]])("refuses %s with invalid_input", async (_name, extra) => {
+    routeDraft();
+    expect(await failure(draft(extra))).toMatch(/^invalid_input: /);
+    expect(writes()).toHaveLength(0);
+  });
+
+  it("keeps the existing message for a pending revision without a binding", async () => {
+    routeDraft({ read: { latest_revision_id: 11 } });
+    const message = await failure(call("drupal_node_create_draft_revision", { instanceId: "site", nodeId: "7", fields: { title: "New" } }));
+    expect(message).toMatch(/^Protected draft unavailable: .*pending draft must be reviewed/);
+  });
 
   it("passes the binding's values to the protected draft writer in place of the connector's own fresh read", async () => {
     routeDraft();
@@ -313,9 +386,21 @@ describe("JSON text arguments", () => {
     await call("drupal_node_update", { instanceId: "site", nodeId: "7", fieldsJson: JSON.stringify({ title: "New" }), expectedBindingJson: JSON.stringify(binding) });
     expect(calls().find((c) => c[1] === WRITE_UNPUBLISHED)?.[2]).toMatchObject({ updates: { title: [{ value: "New" }] }, expected_changed: 1700000000 });
   });
-  it("accepts expectedBindingJson on drupal_node_publish and fieldsJson on the protected draft", async () => {
+  it("accepts expectedBindingJson on drupal_node_publish", async () => {
     await call("drupal_node_publish", { instanceId: "site", nodeId: "7", expectedBindingJson: JSON.stringify(binding) });
     expect(toolsCalled()).toEqual([PUBLISH_UNPUBLISHED]);
+  });
+  it("accepts fieldsJson and expectedBindingJson on the protected draft and writes those values", async () => {
+    route({ read: publishedRead });
+    vi.mocked(callDrupalMcp).mockImplementation(((inner) => async (i: never, tool: string, args: never) => tool === "mcp_jsonapi_list_entities"
+      ? { items: [{ entity_type: "node", id: 7, uuid: "uuid-7", bundle: "article", status: true, fields: { nid: 7, langcode: "de", title: "Old" } }] }
+      : inner(i, tool, args))(vi.mocked(callDrupalMcp).getMockImplementation()!) as never);
+    await call("drupal_node_create_draft_revision", { instanceId: "site", nodeId: "7", fieldsJson: JSON.stringify({ body: "From text" }), expectedBindingJson: JSON.stringify(publishedBinding) });
+    expect(calls().find((c) => c[1] === DRAFT_WRITER)?.[2]).toEqual({
+      nid: 7, language: "de", draft_state: "draft",
+      expected_default_revision_id: 10, expected_latest_revision_id: 10, workflow_fingerprint: A, preimage_fingerprint: C,
+      updates: { body: [{ value: "From text", format: "basic_html", summary: "Keep" }] },
+    });
   });
   it.each<[string, Record<string, unknown>, RegExp]>([
     ["fields and fieldsJson", { fields: { title: "a" }, fieldsJson: "{}" }, /^Give the field updates as fields or as fieldsJson, not both\.$/],
