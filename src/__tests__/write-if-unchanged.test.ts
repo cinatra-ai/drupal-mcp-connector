@@ -18,7 +18,7 @@ import { createDrupalPrimitiveHandlers, nodeUpdateSchema, nodePublishSchema, nod
 import { z } from "zod";
 import { registerDrupalPrimitives } from "../mcp/registry";
 import { registerDrupalConnector } from "../deps";
-import { buildDrupalInstanceClient } from "../lib/drupal-instances";
+import { register } from "../register";
 import { MODULE_READ_REVISION as READER, MODULE_WRITE_DRAFT as DRAFT_WRITER, PROTECTED_DRAFT_CONTRACT, type StoredFieldItems } from "../integration/module-protected-draft";
 import {
   MODULE_WRITE_UNPUBLISHED as WRITE_UNPUBLISHED, MODULE_PUBLISH_UNPUBLISHED as PUBLISH_UNPUBLISHED,
@@ -31,7 +31,7 @@ const C = "c".repeat(64);
 const before: StoredFieldItems = { title: [{ value: "Old" }], body: [{ value: "Old body", format: "basic_html", summary: "Keep" }] };
 const unpublishedRead = { node_id: 7, uuid: "uuid-7", language: "de", default_revision_id: 10, latest_revision_id: 10, is_default_revision: true, is_published: false, changed: 1700000000, moderated: false, canonical_moderation_field: false, workflow_fingerprint: A, preimage_fingerprint: C, draft_states: {}, allowed_draft_states: [], available_fields: ["body", "title"] };
 const publishedRead = { ...unpublishedRead, is_published: true, moderated: true, canonical_moderation_field: true, draft_states: { draft: { published: false, default_revision: false } }, allowed_draft_states: ["draft"] };
-const binding: EditBinding = { instanceId: "site", target: "https://example.test", targetUpdatedAt: "2026-11-01T00:00:00.000Z", nid: 7, language: "de", published: false, expected_default_revision_id: 10, expected_latest_revision_id: 10, expected_changed: 1700000000, workflow_fingerprint: A, preimage_fingerprint: C };
+const binding: EditBinding = { instanceId: "site", target: "https://example.test", nid: 7, language: "de", published: false, expected_default_revision_id: 10, expected_latest_revision_id: 10, expected_changed: 1700000000, workflow_fingerprint: A, preimage_fingerprint: C };
 const publishedBinding: EditBinding = { ...binding, published: true };
 const envelope = (result: unknown) => ({ contract: PROTECTED_DRAFT_CONTRACT, result });
 const authority = vi.fn(async () => {});
@@ -222,7 +222,7 @@ describe("drupal_node_update with expectedBinding", () => {
     ["no target", (({ target: _t, ...rest }) => rest)(binding)],
     ["a target that is not a normalised base URL", { ...binding, target: "https://example.test/" }],
     ["a target with credentials", { ...binding, target: "https://user:secret@example.test" }],
-    ["an empty target stamp", { ...binding, targetUpdatedAt: "" }],
+    ["a targetUpdatedAt member (no longer part of the binding)", { ...binding, targetUpdatedAt: "2026-11-01T00:00:00.000Z" }],
     ["an empty instance", { ...binding, instanceId: "" }],
     ["a non-object", "binding"],
   ])("refuses %s before any call", async (_name, expectedBinding) => {
@@ -640,7 +640,7 @@ describe("through the registered MCP server", () => {
     try {
       const listed = (JSON.parse((await toolsCall("drupal_instances_list", {})).text) as { id: string; siteUrl: string; updatedAt: string }[]).find((i) => i.id === "clone");
       expect(listed).toBeDefined();
-      const forged = { ...binding, instanceId: listed!.id, target: listed!.siteUrl, targetUpdatedAt: listed!.updatedAt };
+      const forged = { ...binding, instanceId: listed!.id, target: listed!.siteUrl };
       const result = await toolsCall("drupal_node_update", { instanceId: "clone", nodeId: "7", fields: { title: "New" }, expectedBinding: forged });
       expect(result.isError).toBe(false);
       expect(authority).toHaveBeenCalledWith({ instanceId: "clone", primitiveName: "drupal_node_update" });
@@ -660,26 +660,38 @@ describe("through the registered MCP server", () => {
 
   it("never sends the connector's instance or target to the module", async () => {
     await toolsCall("drupal_node_publish", { instanceId: "site", nodeId: "7", expectedBinding: binding });
-    for (const key of ["instanceId", "target", "targetUpdatedAt", "published"]) expect(calls()[0][2]).not.toHaveProperty(key);
+    for (const key of ["instanceId", "target", "published"]) expect(calls()[0][2]).not.toHaveProperty(key);
   });
 
-  it("returns the normalised site target and the row stamp in the read's binding", async () => {
-    const read = JSON.parse((await toolsCall("drupal_node_read_for_edit", { instanceId: "site", nid: "7" })).text) as { binding: EditBinding };
+  it("returns the normalised site target, and no row stamp, in the read's binding", async () => {
+    const read = JSON.parse((await toolsCall("drupal_node_read_for_edit", { instanceId: "site", nid: "7" })).text) as { binding: Record<string, unknown> };
     expect(read.binding.target).toBe("https://example.test");
-    expect(read.binding.targetUpdatedAt).toBe("2026-11-01T00:00:00.000Z");
+    expect(read.binding).not.toHaveProperty("targetUpdatedAt");
   });
 
-  describe("a legacy instance row with no stored updatedAt, served by the real instance reader", () => {
-    let stored: Record<string, unknown>;
+  // Through PRODUCTION registration: register(ctx) binds the deps to the host
+  // services, and the instance rows come from the first host provider of
+  // `@cinatra-ai/host:drupal-mcp`, as in the host (which fills a missing
+  // `updatedAt` with the current time on every list).
+  describe("through register(ctx) with the host's instance provider", () => {
+    let rows: Record<string, unknown>[];
     beforeEach(() => {
-      stored = { id: "site", name: "Site", siteUrl: "https://Example.test/", nangoConnectionId: "site", providerConfigKey: "drupal" };
-      const client = buildDrupalInstanceClient({
-        connectorConfig: () => ({ read: <T,>() => ({ instances: [stored] }) as T, write: () => {} }),
-        nango: () => ({ providerConfigKeys: { drupal: "drupal" } }),
-        connectionGate: () => ({}),
-        warn: () => {},
+      rows = [{ id: "site", name: "Site", siteUrl: "https://Example.test/", nangoConnectionId: "site", providerConfigKey: "drupal" }];
+      const host: Record<string, unknown> = {
+        "@cinatra-ai/host:drupal-mcp": {
+          listInstances: () => rows.map((r) => ({ ...r, updatedAt: typeof r.updatedAt === "string" ? r.updatedAt : new Date().toISOString() })),
+        },
+        "@cinatra-ai/host:instance-write-authority": { selectForConnector: () => ({ requireWrite: authority }) },
+        "nango-system": { isNangoConfigured: () => true, buildBearerAuthHeaderFromNango: async () => ({ Authorization: "Bearer unit" }) },
+      };
+      const registered: Record<string, unknown[]> = {};
+      register({
+        capabilities: {
+          resolveProviders: (id: string) => [...(host[id] !== undefined ? [{ packageName: "@cinatra-ai/host", impl: host[id] }] : []), ...(registered[id] ?? [])],
+          registerProvider: (id: string, p: unknown) => { (registered[id] ??= []).push(p); },
+        },
+        logger: { warn: () => {}, info: () => {}, error: () => {}, debug: () => {} },
       } as never);
-      registerDrupalConnector({ decodeCursor: () => 0, buildListPage: (items, total) => ({ items, total }), dispatchContentEditor: async () => "{}", buildNangoBearerHeader: async () => ({ Authorization: "Bearer unit" }), listMcpInstances: () => client.getDrupalAPISettings().instances, probeMcp: async () => "registered", resolveMcpServerUrl: (u) => u, isPrivateUrl: () => false, isNangoConfigured: () => true, getApiStatus: async () => ({ instanceCount: 1, instances: [] }), saveInstance: vi.fn(), deleteInstance: vi.fn(), listInstanceStatuses: async () => [], requireInstanceWriteAuthority: authority });
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date("2026-11-25T08:00:00.000Z"));
     });
@@ -687,27 +699,29 @@ describe("through the registered MCP server", () => {
       vi.useRealTimers();
       deps();
     });
+    const readBinding = async () => (JSON.parse((await toolsCall("drupal_node_read_for_edit", { instanceId: "site", nid: "7" })).text) as { binding: EditBinding }).binding;
 
-    async function readBinding(): Promise<EditBinding> {
-      return (JSON.parse((await toolsCall("drupal_node_read_for_edit", { instanceId: "site", nid: "7" })).text) as { binding: EditBinding }).binding;
-    }
-
-    it("records no made-up stamp and writes after the clock moved", async () => {
+    it.each<[string, Record<string, unknown>]>([
+      ["a legacy row with no updatedAt, after the clock moved", {}],
+      ["a row re-saved with the same site URL", { updatedAt: "2026-11-25T08:10:00.000Z" }],
+    ])("writes for an unchanged site: %s", async (_name, change) => {
       const read = await readBinding();
-      expect(read.targetUpdatedAt).toBeNull();
       vi.setSystemTime(new Date("2026-11-25T09:30:00.000Z"));
+      Object.assign(rows[0], change);
       route();
       const result = await toolsCall("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: read });
       expect(result.isError).toBe(false);
+      expect(result.structured?.ok).toBe(true);
       expect(writes()).toHaveLength(1);
     });
 
-    it("refuses when the legacy row was saved (and got a real stamp) between the read and the write", async () => {
+    it("returns invalid_binding when the same instance id was re-pointed to another site", async () => {
       const read = await readBinding();
-      stored.updatedAt = "2026-11-25T08:10:00.000Z";
+      rows[0].siteUrl = "https://clone.example.test";
       vi.mocked(callDrupalMcp).mockClear();
       const result = await toolsCall("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: read });
-      expect(result.text).toMatch(/^invalid_binding: .*reconfigured/);
+      expect(result.returned).toBe(true);
+      expect(result.structured?.code).toBe("invalid_binding");
       expect(callDrupalMcp).not.toHaveBeenCalled();
     });
   });
@@ -715,7 +729,6 @@ describe("through the registered MCP server", () => {
   it.each<[string, Partial<typeof instance>]>([
     ["another site URL", { siteUrl: "https://clone.example.test" }],
     ["another base path", { siteUrl: "https://example.test/clone" }],
-    ["a newer row stamp", { updatedAt: "2026-11-02T00:00:00.000Z" }],
   ])("refuses a binding whose instance id now points at %s before any site call", async (_name, change) => {
     for (const tool of ["drupal_node_update", "drupal_node_publish", "drupal_node_create_draft_revision"]) {
       vi.mocked(callDrupalMcp).mockClear();
@@ -724,7 +737,7 @@ describe("through the registered MCP server", () => {
       try {
         const b = tool === "drupal_node_create_draft_revision" ? publishedBinding : binding;
         const result = await toolsCall(tool, { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: b });
-        expect(result.text).toMatch(/^invalid_binding: .*reconfigured/);
+        expect(result.text).toMatch(/^invalid_binding: .*another site than at the read/);
       } finally {
         Object.assign(instance, { siteUrl: "https://Example.test/", updatedAt: "2026-11-01T00:00:00.000Z" });
       }

@@ -15,15 +15,14 @@ export const MODULE_PUBLISH_UNPUBLISHED = "cinatra_publish_unpublished";
  * `revision_id`), as `drupal_node_read_for_edit` returns it. Every module
  * member carries the module's own input name. The connector's own members are
  * never sent to the module: `instanceId` (the connector instance the page was
- * read from), `target` (`siteTarget` of that instance's site URL at the read),
- * `targetUpdatedAt` (the instance row's STORED `updatedAt` at the read, or
- * null when none is stored: `storedUpdatedAt`) and `published`. A flow passes the object on unchanged.
+ * read from), `target` (`siteTarget` of that instance's site URL at the read)
+ * and `published`. A flow passes the object on unchanged.
  *
  * TRUST BOUNDARY. The binding is data the caller hands back; nothing in it is
  * authenticated (the host gives a connector no per-install sealing service).
  * The connector members are consistency checks against accidents: a binding
  * used with another instance than the call's, or an instance id re-pointed to
- * another site or re-saved since the read. A caller who rewrites them
+ * another site since the read. A caller who rewrites them
  * consistently passes those checks. What authorises a write is the caller's
  * write authority on the instance named in the call (the same authority the
  * unbound forms of these tools need); what binds the reviewed state is the
@@ -32,7 +31,6 @@ export const MODULE_PUBLISH_UNPUBLISHED = "cinatra_publish_unpublished";
 export type EditBinding = {
   instanceId: string;
   target: string;
-  targetUpdatedAt: string | null;
   nid: number;
   language: string;
   published: boolean;
@@ -45,7 +43,7 @@ export type EditBinding = {
 
 const BINDING_KEYS = [
   "expected_changed", "expected_default_revision_id", "expected_latest_revision_id",
-  "instanceId", "language", "nid", "preimage_fingerprint", "published", "target", "targetUpdatedAt",
+  "instanceId", "language", "nid", "preimage_fingerprint", "published", "target",
   "workflow_fingerprint",
 ] as const;
 
@@ -71,26 +69,12 @@ export function siteTarget(siteUrl: string): string | null {
   return `${url.protocol}//${url.host}${path.slice(0, end)}`;
 }
 
-/** The instance reader (`getDrupalAPISettings`) fills a row with no stored
- * `updatedAt` with the current time, for its other callers. It marks such a
- * row with this non-enumerable symbol property, so the row's shape and
- * equality stay the same for them. */
-export const UPDATED_AT_SYNTHESISED: unique symbol = Symbol.for("cinatra.drupal-mcp-connector.updated-at-synthesised") as never;
-
-/** The row's `updatedAt` only if it is really stored: null when the reader
- * made it up, or when it is absent or empty. A row whose marker was lost (a
- * copy) gives the made-up value, which then never matches: it refuses. */
-export function storedUpdatedAt(instance: { updatedAt?: string }): string | null {
-  if ((instance as Record<PropertyKey, unknown>)[UPDATED_AT_SYNTHESISED] === true) return null;
-  return typeof instance.updatedAt === "string" && instance.updatedAt !== "" ? instance.updatedAt : null;
-}
-
 /** The instance members of a binding, from the instance row the call resolved
  * once: the same row the call then uses for every site call. The read tool and
  * the write check both use this function. */
-export function bindingTarget(instance: { siteUrl: string; updatedAt?: string }): { target: string; targetUpdatedAt: string | null } | null {
+export function bindingTarget(instance: { siteUrl: string }): { target: string } | null {
   const target = siteTarget(instance.siteUrl);
-  return target === null ? null : { target, targetUpdatedAt: storedUpdatedAt(instance) };
+  return target === null ? null : { target };
 }
 
 /** A refusal with a stable code a flow can branch on. The message is
@@ -126,7 +110,7 @@ export const REFUSAL = {
   invalidBinding: () => new DrupalEditRefusal("invalid_binding",
     "expectedBinding must be the binding object from drupal_node_read_for_edit, with every member present and well formed and no other member. Nothing was written."),
   targetChanged: () => new DrupalEditRefusal("invalid_binding",
-    "This Drupal instance was reconfigured since the read; expectedBinding names its earlier site. Nothing was written. Read the page again."),
+    "This Drupal instance points at another site than at the read; expectedBinding names its earlier site. Nothing was written. Read the page again."),
   bindingMismatch: () => new DrupalEditRefusal("invalid_binding",
     "expectedBinding names another Drupal instance, page or language than this call. Nothing was written."),
   publishedBinding: () => new DrupalEditRefusal("wrong_page_state",
@@ -196,7 +180,6 @@ export function checkEditBinding(value: unknown, call: { instanceId: string; nid
   if (keys.length !== BINDING_KEYS.length || keys.some((key, i) => key !== BINDING_KEYS[i])
     || typeof b.instanceId !== "string" || b.instanceId === ""
     || typeof b.target !== "string" || b.target === "" || siteTarget(b.target) !== b.target
-    || (b.targetUpdatedAt !== null && (typeof b.targetUpdatedAt !== "string" || b.targetUpdatedAt === ""))
     || !positive(b.nid) || typeof b.language !== "string" || !LANGCODE.test(b.language)
     || typeof b.published !== "boolean"
     || !positive(b.expected_default_revision_id) || !positive(b.expected_latest_revision_id)
@@ -208,7 +191,7 @@ export function checkEditBinding(value: unknown, call: { instanceId: string; nid
   if (b.instanceId !== call.instanceId || b.nid !== call.nid
     || (call.language !== undefined && b.language !== call.language)) throw REFUSAL.bindingMismatch();
   return {
-    instanceId: b.instanceId, target: b.target, targetUpdatedAt: b.targetUpdatedAt as string | null,
+    instanceId: b.instanceId, target: b.target,
     nid: b.nid, language: b.language, published: b.published,
     expected_default_revision_id: b.expected_default_revision_id,
     expected_latest_revision_id: b.expected_latest_revision_id,
@@ -218,15 +201,16 @@ export function checkEditBinding(value: unknown, call: { instanceId: string; nid
 }
 
 /** Refuse before any site call unless the instance row resolved for this write
- * points at the site, and carries the stored stamp, the binding names. A
- * consistency check, not authentication (see the trust boundary above). */
-export function checkBindingTarget(binding: EditBinding, instance: { siteUrl: string; updatedAt?: string }): void {
+ * points at the site the binding names. A re-save that keeps the site URL is
+ * no reason to refuse. A consistency check, not authentication (see the trust
+ * boundary above). */
+export function checkBindingTarget(binding: EditBinding, instance: { siteUrl: string }): void {
   const now = bindingTarget(instance);
-  if (now === null || now.target !== binding.target || now.targetUpdatedAt !== binding.targetUpdatedAt) throw REFUSAL.targetChanged();
+  if (now === null || now.target !== binding.target) throw REFUSAL.targetChanged();
 }
 
 /** The binding's members as the module's tools take them: never the
- * connector's own `instanceId`, `target`, `targetUpdatedAt` and `published`. */
+ * connector's own `instanceId`, `target` and `published`. */
 export function moduleBindingArgs(binding: EditBinding): Record<string, unknown> {
   return {
     nid: binding.nid, language: binding.language,
