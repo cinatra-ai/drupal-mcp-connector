@@ -10,7 +10,7 @@ Read and explicitly publish Drupal content from Cinatra agents. Update unpublish
 
 **Architecture:** the connector owns the MCP client, instance settings and activation of drupal-mcp/widget-auth capabilities. Its `cinatra.devSetup` hook provisions the local fixture.
 
-**API notes:** `drupal_node_get` reads fields via MCP, falling back to recent-content summaries. `drupal_node_update` reads actual status and refuses published or unknown-status nodes. `drupal_node_create_draft_revision` accepts `instanceId`, `nodeId`, `fields` for the SAME node, never a stray new page or live-default write. It reads via `cinatra_read_protected_revision`, saves once via `cinatra_write_protected_draft` and reads the revision back; without them it refuses before any content write. Never follow it with generic update. Creating a separate page is your own explicit action, not a connector operation. Empty-string fields are stripped to prevent wipes.
+**API notes:** `drupal_node_get` reads fields via MCP, falling back to recent-content summaries. `drupal_node_update` reads actual status and refuses published or unknown-status nodes. `drupal_node_create_draft_revision` accepts `instanceId`, `nodeId`, `fields` for the SAME node, never a stray new page or live-default write. It reads via `cinatra_read_protected_revision`, saves once via `cinatra_write_protected_draft` and reads the revision back; without them it refuses before any content write. Never follow it with generic update. A separate page is your own explicit action. `drupal_node_read_for_edit` returns a `binding`; given as `expectedBinding`, a write saves only an unchanged page. Empty-string fields are stripped.
 
 **Development:** `pnpm vitest run --no-coverage`; see `AGENTS.md` for mappings and invariants.
 

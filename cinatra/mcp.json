@@ -7,6 +7,7 @@
     "drupal_status",
     "drupal_instances_list",
     "drupal_node_get",
+    "drupal_node_read_for_edit",
     "drupal_node_update",
     "drupal_node_create_draft_revision",
     "drupal_node_list",

@@ -537,7 +537,7 @@ describe("createDrupalPrimitiveHandlers", () => {
     ).rejects.toThrow();
   });
 
-  it("registers exactly 8 primitives (status, instances_list, node_get, node_update, node_create_draft_revision, node_list, node_publish, content_editor_run)", () => {
+  it("registers exactly 9 primitives (status, instances_list, node_get, node_read_for_edit, node_update, node_create_draft_revision, node_list, node_publish, content_editor_run)", () => {
     const keys = Object.keys(handlers as any).sort();
     expect(keys).toEqual([
       "drupal_content_editor_run",
@@ -546,6 +546,7 @@ describe("createDrupalPrimitiveHandlers", () => {
       "drupal_node_get",
       "drupal_node_list",
       "drupal_node_publish",
+      "drupal_node_read_for_edit",
       "drupal_node_update",
       "drupal_status",
     ]);

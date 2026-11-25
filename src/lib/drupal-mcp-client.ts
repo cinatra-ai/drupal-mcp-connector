@@ -155,6 +155,40 @@ export async function callDrupalMcp(
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<unknown> {
+  return withDrupalMcpClient(instance, async (client) => {
+    const result = await client.callTool({ name: toolName, arguments: args });
+    return unwrapToolResult(toolName, result);
+  });
+}
+
+// At most this many `tools/list` pages are read; a longer listing refuses.
+const MAX_TOOL_LIST_PAGES = 20;
+
+/**
+ * The tool names the site's MCP endpoint lists for this connection
+ * (cinatra#3745). A write bound to an earlier read checks here that the
+ * Cinatra module's bound write tool is offered before it calls it, so an
+ * older module is refused rather than replaced by another tool. Same
+ * transport, endpoint and Nango bearer as `callDrupalMcp`; it calls no tool.
+ */
+export async function listDrupalMcpToolNames(instance: DrupalMcpInstance): Promise<string[]> {
+  return withDrupalMcpClient(instance, async (client) => {
+    const names: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < MAX_TOOL_LIST_PAGES; page++) {
+      const result = await client.listTools(cursor === undefined ? undefined : { cursor });
+      for (const tool of result.tools) names.push(tool.name);
+      cursor = result.nextCursor;
+      if (cursor === undefined) return names;
+    }
+    throw new Error(`Drupal tools/list did not end within ${MAX_TOOL_LIST_PAGES} pages`);
+  });
+}
+
+async function withDrupalMcpClient<T>(
+  instance: DrupalMcpInstance,
+  run: (client: Client) => Promise<T>,
+): Promise<T> {
   const baseUrl = instance.siteUrl.replace(/\/+$/, "") + MCP_TOOLS_PATH;
   const authHeader = await getDrupalDeps().buildNangoBearerHeader({
     providerConfigKey: instance.providerConfigKey,
@@ -190,55 +224,58 @@ export async function callDrupalMcp(
   );
   try {
     await client.connect(transport);
-    const result = await client.callTool({ name: toolName, arguments: args });
-    // Drupal mcp_tools ToolApiCallToolHandler sets structuredContent = { success, message, data }
-    // alongside the text content which is prefixed with "Success.\n{json}".
-    // Prefer structuredContent (clean JSON) when available; it's the authoritative data.
-    // `structuredContent` is a DECLARED field on client@2.0.0's `CallToolResult`
-    // (v1 needed a whole-result cast to reach it) but is typed `unknown`, so the
-    // cast narrows the value, not the field's existence.
-    const structured = result.structuredContent as Record<string, unknown> | undefined;
-    if (structured && typeof structured === "object") {
-      // Drupal error envelope: { success: false, message: "..." } — surface the real error.
-      if ("success" in structured && structured.success === false) {
-        const msg = structured.message;
-        throw new Error(
-          `Drupal ${toolName} returned failure: ${typeof msg === "string" ? msg : JSON.stringify(structured)}`,
-        );
-      }
-      if (!("data" in structured)) return structured;
-      const data = structured.data;
-      // data: null means Drupal returned the envelope but no payload — callers would get
-      // misleading "not found" errors; surface the real cause here instead.
-      if (data === null || data === undefined) {
-        throw new Error(`Drupal ${toolName}: response envelope has null data`);
-      }
-      return data;
-    }
-    // `content` is a DECLARED array field on client@2.0.0's `CallToolResult`
-    // (v1 needed the same whole-result cast as `structuredContent`), but the
-    // `Array.isArray` guard is KEPT rather than trusting the type: it is what
-    // turns a malformed result into this module's own "unexpected response
-    // format" error instead of a `TypeError` on `.find()`, and dropping it
-    // would change behaviour on exactly the path the parity suite pins.
-    const content = result.content;
-    const textItem = Array.isArray(content) ? content.find((c) => c.type === "text") : undefined;
-    if (!textItem || !("text" in textItem) || typeof textItem.text !== "string") {
-      throw new Error(`Drupal ${toolName}: unexpected response format (no text content)`);
-    }
-    // mcp_tools text is "Success.\n{json}" — strip the known prefix before searching for JSON
-    // to avoid false-positive { matches inside an error message preceding the actual JSON.
-    const stripped = textItem.text.replace(/^Success\.\s*/, "");
-    const jsonStart = stripped.search(/[{[]/);
-    const jsonText = jsonStart >= 0 ? stripped.slice(jsonStart) : stripped;
-    try {
-      const parsed = JSON.parse(jsonText) as Record<string, unknown>;
-      // Unwrap { success, message, data } envelope that ToolApiCallToolHandler wraps results in.
-      return "data" in parsed ? parsed.data : parsed;
-    } catch {
-      return textItem.text;
-    }
+    return await run(client);
   } finally {
     await client.close().catch(() => {});
+  }
+}
+
+function unwrapToolResult(toolName: string, result: Awaited<ReturnType<Client["callTool"]>>): unknown {
+  // Drupal mcp_tools ToolApiCallToolHandler sets structuredContent = { success, message, data }
+  // alongside the text content which is prefixed with "Success.\n{json}".
+  // Prefer structuredContent (clean JSON) when available; it's the authoritative data.
+  // `structuredContent` is a DECLARED field on client@2.0.0's `CallToolResult`
+  // (v1 needed a whole-result cast to reach it) but is typed `unknown`, so the
+  // cast narrows the value, not the field's existence.
+  const structured = result.structuredContent as Record<string, unknown> | undefined;
+  if (structured && typeof structured === "object") {
+    // Drupal error envelope: { success: false, message: "..." } — surface the real error.
+    if ("success" in structured && structured.success === false) {
+      const msg = structured.message;
+      throw new Error(
+        `Drupal ${toolName} returned failure: ${typeof msg === "string" ? msg : JSON.stringify(structured)}`,
+      );
+    }
+    if (!("data" in structured)) return structured;
+    const data = structured.data;
+    // data: null means Drupal returned the envelope but no payload — callers would get
+    // misleading "not found" errors; surface the real cause here instead.
+    if (data === null || data === undefined) {
+      throw new Error(`Drupal ${toolName}: response envelope has null data`);
+    }
+    return data;
+  }
+  // `content` is a DECLARED array field on client@2.0.0's `CallToolResult`
+  // (v1 needed the same whole-result cast as `structuredContent`), but the
+  // `Array.isArray` guard is KEPT rather than trusting the type: it is what
+  // turns a malformed result into this module's own "unexpected response
+  // format" error instead of a `TypeError` on `.find()`, and dropping it
+  // would change behaviour on exactly the path the parity suite pins.
+  const content = result.content;
+  const textItem = Array.isArray(content) ? content.find((c) => c.type === "text") : undefined;
+  if (!textItem || !("text" in textItem) || typeof textItem.text !== "string") {
+    throw new Error(`Drupal ${toolName}: unexpected response format (no text content)`);
+  }
+  // mcp_tools text is "Success.\n{json}" — strip the known prefix before searching for JSON
+  // to avoid false-positive { matches inside an error message preceding the actual JSON.
+  const stripped = textItem.text.replace(/^Success\.\s*/, "");
+  const jsonStart = stripped.search(/[{[]/);
+  const jsonText = jsonStart >= 0 ? stripped.slice(jsonStart) : stripped;
+  try {
+    const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+    // Unwrap { success, message, data } envelope that ToolApiCallToolHandler wraps results in.
+    return "data" in parsed ? parsed.data : parsed;
+  } catch {
+    return textItem.text;
   }
 }

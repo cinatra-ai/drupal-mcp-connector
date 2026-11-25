@@ -25,16 +25,17 @@ import {
 const mockConnect = vi.fn();
 const mockCallTool = vi.fn();
 const mockClose = vi.fn();
+const mockListTools = vi.fn();
 
 vi.mock("@modelcontextprotocol/client", () => ({
   // Regular function required — arrow functions cannot be used with `new`.
   Client: vi.fn().mockImplementation(function () {
-    return { connect: mockConnect, callTool: mockCallTool, close: mockClose };
+    return { connect: mockConnect, callTool: mockCallTool, close: mockClose, listTools: mockListTools };
   }),
   StreamableHTTPClientTransport: vi.fn().mockImplementation(function () { return {}; }),
 }));
 
-import { callDrupalMcp, DRUPAL_MCP_VERSION_NEGOTIATION } from "../lib/drupal-mcp-client";
+import { callDrupalMcp, listDrupalMcpToolNames, DRUPAL_MCP_VERSION_NEGOTIATION } from "../lib/drupal-mcp-client";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
 // The host-bound Nango bearer-header builder (deps.buildNangoBearerHeader).
@@ -55,6 +56,7 @@ describe("callDrupalMcp", () => {
     mockConnect.mockReset().mockResolvedValue(undefined);
     mockCallTool.mockReset();
     mockClose.mockReset().mockResolvedValue(undefined);
+    mockListTools.mockReset();
     vi.mocked(StreamableHTTPClientTransport).mockClear();
     vi.mocked(Client).mockClear();
     buildNangoBearerHeader.mockReset();
@@ -246,5 +248,28 @@ describe("callDrupalMcp", () => {
     ];
     expect(options?.versionNegotiation).toBe(DRUPAL_MCP_VERSION_NEGOTIATION);
     expect(DRUPAL_MCP_VERSION_NEGOTIATION).toEqual({ mode: "auto" });
+  });
+
+  // cinatra#3745: a write bound to an earlier read checks the site's tool list
+  // for the Cinatra module tool before it calls it.
+  describe("listDrupalMcpToolNames", () => {
+    it("reads every tools/list page over the same transport and calls no tool", async () => {
+      mockListTools
+        .mockResolvedValueOnce({ tools: [{ name: "cinatra_read_protected_revision" }], nextCursor: "p2" })
+        .mockResolvedValueOnce({ tools: [{ name: "cinatra_write_unpublished" }] });
+      await expect(listDrupalMcpToolNames(inst())).resolves.toEqual(["cinatra_read_protected_revision", "cinatra_write_unpublished"]);
+      expect(mockListTools.mock.calls).toEqual([[undefined], [{ cursor: "p2" }]]);
+      expect(mockCallTool).not.toHaveBeenCalled();
+      const [url] = vi.mocked(StreamableHTTPClientTransport).mock.calls[0];
+      expect(String(url)).toBe("http://localhost:8082/_mcp_tools");
+      expect(mockClose).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses a listing that does not end within 20 pages", async () => {
+      mockListTools.mockResolvedValue({ tools: [], nextCursor: "again" });
+      await expect(listDrupalMcpToolNames(inst())).rejects.toThrow(/20 pages/);
+      expect(mockListTools).toHaveBeenCalledTimes(20);
+      expect(mockClose).toHaveBeenCalledTimes(1);
+    });
   });
 });
