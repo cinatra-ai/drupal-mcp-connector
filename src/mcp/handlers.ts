@@ -5,14 +5,19 @@
 import { z } from "zod";
 import type { ExtensionPrimitiveRequest } from "@cinatra-ai/sdk-extensions";
 
-import { callDrupalMcp } from "../lib/drupal-mcp-client";
+import { callDrupalMcp, listDrupalMcpToolNames } from "../lib/drupal-mcp-client";
 import { nodePublishedStatus } from "../integration/protected-draft";
 import {
-  MODULE_READ_REVISION, MODULE_WRITE_DRAFT, prepareModuleDraft, readModuleNode,
+  MODULE_READ_REVISION, MODULE_WRITE_DRAFT, prepareModuleDraft, readModuleNode, readModuleEditNode,
   structureModuleUpdates, verifyModuleRevision,
   reportedModuleRevisionId, stableStringify, DRUPAL_SYSTEM_FIELD_PATHS,
   type ModuleDraftIdentity, type ModuleDraftPlan,
 } from "../integration/module-protected-draft";
+import {
+  MODULE_WRITE_UNPUBLISHED, MODULE_PUBLISH_UNPUBLISHED, BINDING_ARGUMENT, FIELDS_ARGUMENT, REFUSAL,
+  DrupalEditRefusal, checkEditBinding, mapModuleWriteFailure, moduleBindingArgs, objectOrJsonText,
+  verifyUnpublishedWrite, type EditBinding,
+} from "../integration/edit-binding";
 // Host-shared runtime surfaces (pagination + A2A dispatch + the instance-admin
 // reads — `@/lib/drupal-api` stays host-side, cinatra#172 Stage H2) are
 // resolved via DI so this package carries no non-SDK `@cinatra-ai/*` code
@@ -89,10 +94,25 @@ export const nodeGetSchema = z.object({
   nodeId: z.string().min(1),
 });
 
+// cinatra#3745: the write tools take the binding of an earlier
+// drupal_node_read_for_edit read (`expectedBinding`), and a flow step without a
+// model may send the object arguments as JSON text (`fieldsJson`,
+// `expectedBindingJson`). Exactly one form of each pair; fields are required.
+const FIELDS_DESCRIPTION = "Field updates: canonical field names mapped to the new values.";
+const FIELDS_JSON_DESCRIPTION = "The same field updates as the text of a JSON object, for a caller that can send only text. Give fields or fieldsJson, not both.";
+const BINDING_DESCRIPTION = "The binding from drupal_node_read_for_edit. When given, the write happens only if the page is unchanged since that read; the Cinatra module compares it under the node lock.";
+const BINDING_JSON_DESCRIPTION = "The same binding as the text of a JSON object. Give expectedBinding or expectedBindingJson, not both.";
+const editArguments = {
+  fieldsJson: z.string().optional().describe(FIELDS_JSON_DESCRIPTION),
+  expectedBinding: z.record(z.string(), z.unknown()).optional().describe(BINDING_DESCRIPTION),
+  expectedBindingJson: z.string().optional().describe(BINDING_JSON_DESCRIPTION),
+};
+
 export const nodeUpdateSchema = z.object({
   instanceId: z.string().min(1),
   nodeId: z.string().regex(/^[1-9]\d*$/),
-  fields: z.record(z.string(), z.unknown()),
+  fields: z.record(z.string(), z.unknown()).optional().describe(FIELDS_DESCRIPTION),
+  ...editArguments,
 });
 
 export const nodeCreateDraftSchema = z.object({
@@ -100,7 +120,24 @@ export const nodeCreateDraftSchema = z.object({
   nodeId: z.string().regex(/^[1-9]\d*$/),
   language: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional(),
   expectedFields: z.record(z.string(), z.unknown()).optional(),
-  fields: z.record(z.string(), z.unknown()),
+  fields: z.record(z.string(), z.unknown()).optional().describe(FIELDS_DESCRIPTION),
+  ...editArguments,
+}).strict();
+
+// drupal_node_publish: without a binding it publishes through
+// mcp_publish_content as before. With a binding it publishes the unpublished
+// page through the Cinatra module, and with fields it writes them and
+// publishes in the same save.
+export const nodePublishSchema = nodeGetSchema.extend({
+  fields: z.record(z.string(), z.unknown()).optional().describe(`${FIELDS_DESCRIPTION} Only with expectedBinding: written and published in one save.`),
+  ...editArguments,
+});
+
+// cinatra#3745: the read a bound edit starts from.
+export const nodeReadForEditSchema = z.object({
+  instanceId: z.string().min(1),
+  nid: z.union([z.number().int().positive(), z.string().regex(/^[1-9]\d*$/)]).describe("Node ID of the page to read."),
+  language: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional().describe("Exact language code of the translation to read; omit it to read the original translation."),
 }).strict();
 
 export const nodeListSchema = z.object({
@@ -451,6 +488,80 @@ async function readCurrentNodeForDraft(
 }
 
 // ---------------------------------------------------------------------------
+// Writes bound to an earlier read (cinatra#3745, owner decision 1234 A).
+//
+// A flow reads the page with drupal_node_read_for_edit, a person reviews the
+// change, and one publishing step writes it with the read's binding. The
+// connector checks the binding's shape only; the Cinatra module compares it
+// with the stored page under the node lock and refuses a changed page before
+// it saves. A bound write never falls back to the third-party mcp_* tools.
+// ---------------------------------------------------------------------------
+
+/** The field updates and the binding of a write call, each from its object or
+ * its JSON text form. */
+function editArgumentsOf(input: { fields?: Record<string, unknown>; fieldsJson?: string; expectedBinding?: Record<string, unknown>; expectedBindingJson?: string }) {
+  return {
+    fields: objectOrJsonText(input.fields, input.fieldsJson, FIELDS_ARGUMENT),
+    binding: objectOrJsonText(input.expectedBinding, input.expectedBindingJson, BINDING_ARGUMENT),
+  };
+}
+
+/** Refuse before any write unless the site lists every named module tool. An
+ * older module is refused; no other tool takes its place. */
+async function requireModuleTools(instance: DrupalMcpInstance, tools: string[]): Promise<void> {
+  let names: string[];
+  try {
+    names = await listDrupalMcpToolNames(instance);
+  } catch {
+    throw REFUSAL.capabilityUnconfirmed();
+  }
+  for (const tool of tools) if (!names.includes(tool)) throw REFUSAL.capabilityMissing(tool);
+}
+
+/** Write (and with `publish` publish) an unpublished page, or with no fields
+ * only publish it, through the Cinatra module, only if it is unchanged since
+ * the read that `binding` comes from. */
+async function writeUnpublishedBound(
+  instance: DrupalMcpInstance,
+  nodeId: string,
+  binding: EditBinding,
+  fields: Record<string, unknown> | undefined,
+  publish: boolean,
+): Promise<Record<string, unknown>> {
+  const tool = fields === undefined ? MODULE_PUBLISH_UNPUBLISHED : MODULE_WRITE_UNPUBLISHED;
+  await requireModuleTools(instance, fields === undefined ? [tool] : [tool, MODULE_READ_REVISION]);
+  const requested = fields === undefined ? [] : Object.keys(fields).sort();
+  const args: Record<string, unknown> = moduleBindingArgs(binding);
+  if (fields !== undefined) {
+    // The stored item structure (text format, summary) of the requested
+    // fields, so a scalar edit keeps it. This read binds nothing: the module
+    // compares the binding at the write.
+    let stored: Record<string, Record<string, unknown>[]>;
+    try {
+      stored = readModuleNode(await callDrupalMcp(instance, MODULE_READ_REVISION, {
+        nid: binding.nid, language: binding.language, fields: requested,
+      }), binding.nid, requested, binding.language).fields;
+    } catch (error) {
+      throw mapModuleWriteFailure(error, MODULE_READ_REVISION, binding) ?? REFUSAL.structureUnavailable();
+    }
+    try {
+      args.updates = structureModuleUpdates(fields, stored);
+    } catch {
+      throw REFUSAL.invalidInput();
+    }
+    if (publish) args.publish = true;
+  }
+  let result: unknown;
+  try {
+    result = await callDrupalMcp(instance, tool, args);
+  } catch (error) {
+    throw mapModuleWriteFailure(error, tool, binding) ?? REFUSAL.writeUnverified();
+  }
+  const written = verifyUnpublishedWrite(result, binding, requested, fields === undefined || publish);
+  return { nodeId, nid: binding.nid, language: binding.language, ...written, applied: true };
+}
+
+// ---------------------------------------------------------------------------
 // Handler factory
 // ---------------------------------------------------------------------------
 
@@ -528,8 +639,60 @@ export function createDrupalPrimitiveHandlers() {
       return node;
     },
 
+    // cinatra#3745: the read a bound edit starts from. It calls only the
+    // Cinatra module reader without a revision (never a write tool): first for
+    // the node's editable field names, then for every one of them in the bound
+    // translation. It returns the field values and the module's binding of
+    // that read, which a write tool takes as `expectedBinding`.
+    drupal_node_read_for_edit: async (request: ExtensionPrimitiveRequest<unknown>) => {
+      const input = nodeReadForEditSchema.parse(request.input);
+      const nid = Number(input.nid);
+      if (!Number.isSafeInteger(nid) || nid <= 0) throw new Error("Invalid nid: not a positive integer");
+      const instance = await resolveInstance(input.instanceId);
+      const read = async (language: string | undefined, names: string[]) => readModuleEditNode(
+        await callDrupalMcp(instance, MODULE_READ_REVISION, { nid, ...(language === undefined ? {} : { language }), fields: names }),
+        nid, names, language, REFUSAL.readCapabilityMissing,
+      );
+      const first = await read(input.language, ["title"]);
+      const names = [...new Set(["title", ...first.available_fields])].sort();
+      const full = names.length === 1 ? first : await read(first.language, names);
+      if (full.uuid !== first.uuid || full.is_published !== first.is_published
+        || full.default_revision_id !== first.default_revision_id || full.latest_revision_id !== first.latest_revision_id
+        || full.changed !== first.changed || full.workflow_fingerprint !== first.workflow_fingerprint
+        || full.preimage_fingerprint !== first.preimage_fingerprint
+        || stableStringify([...full.available_fields].sort()) !== stableStringify([...first.available_fields].sort())) {
+        throw REFUSAL.readChanged();
+      }
+      const binding: EditBinding = {
+        nid, language: full.language, published: full.is_published,
+        expected_default_revision_id: full.default_revision_id,
+        expected_latest_revision_id: full.latest_revision_id,
+        expected_changed: full.changed,
+        workflow_fingerprint: full.workflow_fingerprint,
+        preimage_fingerprint: full.preimage_fingerprint,
+      };
+      return {
+        nodeId: String(nid), nid, uuid: full.uuid, language: full.language, published: full.is_published,
+        fields: Object.fromEntries(Object.entries(full.fields).map(([name, items]) => [
+          name, items.length === 1 && Object.hasOwn(items[0], "value") ? items[0].value : items,
+        ])),
+        stored_fields: full.fields,
+        available_fields: [...full.available_fields],
+        binding,
+      };
+    },
+
     drupal_node_update: async (request: ExtensionPrimitiveRequest<unknown>) => {
-      const input = nodeUpdateSchema.parse(request.input);
+      const parsed = nodeUpdateSchema.parse(request.input);
+      const edit = editArgumentsOf(parsed);
+      if (edit.fields === undefined) throw new Error("No fields provided.");
+      // Publishing goes through drupal_node_publish, the tool declared outward.
+      if ((request.input as { publish?: unknown } | null)?.publish === true) {
+        throw new Error("drupal_node_update does not publish. Publish with drupal_node_publish; with expectedBinding and fields it writes and publishes in one save.");
+      }
+      const binding = edit.binding === undefined ? undefined : checkEditBinding(edit.binding, { nid: Number(parsed.nodeId) });
+      if (binding?.published) throw REFUSAL.publishedBinding();
+      const input = { ...parsed, fields: edit.fields };
       const instance = await resolveInstance(input.instanceId);
       // cinatra#409 — per-user / per-instance write authorization (fail-closed).
       // Throws on deny BEFORE any write reaches the Drupal site.
@@ -563,6 +726,10 @@ export function createDrupalPrimitiveHandlers() {
         throw new Error("All submitted fields were empty strings — nothing to update.");
       }
 
+      // A bound write goes only to the Cinatra module, which compares the
+      // binding under the node lock; never to mcp_update_content.
+      if (binding) return writeUnpublishedBound(instance, input.nodeId, binding, safeFields, false);
+
       // The default node is the only target generic update can address. Never
       // interpret an earlier draft call or caller status as revision authority.
       const current = await readCurrentNode(instance, nid);
@@ -578,9 +745,18 @@ export function createDrupalPrimitiveHandlers() {
     },
 
     drupal_node_create_draft_revision: async (request: ExtensionPrimitiveRequest<unknown>) => {
-      const input = nodeCreateDraftSchema.parse(request.input);
+      const parsed = nodeCreateDraftSchema.parse(request.input);
+      const edit = editArgumentsOf(parsed);
+      if (edit.fields === undefined) throw new Error("No fields provided.");
+      const binding = edit.binding === undefined ? undefined
+        : checkEditBinding(edit.binding, { nid: Number(parsed.nodeId), language: parsed.language });
+      if (binding && !binding.published) throw REFUSAL.unpublishedBinding();
+      const input = { ...parsed, fields: edit.fields, language: binding?.language ?? parsed.language };
       const instance = await resolveInstance(input.instanceId);
       await requireWriteAuthority(input.instanceId, "drupal_node_create_draft_revision");
+      // A bound draft needs the module version whose writers bind the
+      // translation and compare the reviewed values.
+      if (binding) await requireModuleTools(instance, [MODULE_WRITE_DRAFT, MODULE_WRITE_UNPUBLISHED]);
       const nid = Number(input.nodeId);
       const fields = Object.fromEntries(Object.entries(input.fields).filter(([, value]) => value !== ""));
       if (Object.keys(fields).length === 0) throw new Error("No changed fields for a protected draft.");
@@ -599,7 +775,8 @@ export function createDrupalPrimitiveHandlers() {
       // A language that equals the fresh read's path-only candidate (the agent
       // passes the read's language back, so an explicit equal value counts too)
       // is bound below to the module's reported translations before any write.
-      const pathOnlyLanguage = PATH_ONLY_LANGCODE.has(current) && language === current.langcode;
+      // A bound language comes from the module reader, never from a path item.
+      const pathOnlyLanguage = !binding && PATH_ONLY_LANGCODE.has(current) && language === current.langcode;
       const expected: ModuleDraftIdentity = { nid, uuid: current.uuid, language, fields: Object.keys(fields).sort() };
       const readPreimage = async (identity: ModuleDraftIdentity): Promise<ModuleDraftPlan> => {
         let result: unknown;
@@ -644,15 +821,33 @@ export function createDrupalPrimitiveHandlers() {
       // From dispatch onward a transport failure cannot prove zero writes. The
       // backend binds actual revision/configuration and owns the atomic save.
       let returnedRevisionId: number | undefined;
+      // With a binding the writer compares the reviewed read's values, not
+      // this fresh read's; the fresh read only supplies the draft state and
+      // the stored item structure.
+      const expectedValues = binding ? {
+        expected_default_revision_id: binding.expected_default_revision_id,
+        expected_latest_revision_id: binding.expected_latest_revision_id,
+        workflow_fingerprint: binding.workflow_fingerprint,
+        preimage_fingerprint: binding.preimage_fingerprint,
+      } : {
+        expected_default_revision_id: plan.preimage.default_revision_id,
+        expected_latest_revision_id: plan.preimage.latest_revision_id,
+        workflow_fingerprint: plan.preimage.workflow_fingerprint,
+        preimage_fingerprint: plan.preimage.preimage_fingerprint,
+      };
       try {
-        const writerResult = await callDrupalMcp(instance, MODULE_WRITE_DRAFT, {
-          nid, language, draft_state: plan.state,
-          expected_default_revision_id: plan.preimage.default_revision_id,
-          expected_latest_revision_id: plan.preimage.latest_revision_id,
-          workflow_fingerprint: plan.preimage.workflow_fingerprint,
-          preimage_fingerprint: plan.preimage.preimage_fingerprint,
-          updates,
-        });
+        let writerResult: unknown;
+        try {
+          writerResult = await callDrupalMcp(instance, MODULE_WRITE_DRAFT, {
+            nid, language, draft_state: plan.state, ...expectedValues, updates,
+          });
+        } catch (error) {
+          // A module refusal stored nothing (it is thrown inside the module's
+          // transaction). Any other failure keeps the inspection message.
+          const refusal = binding ? mapModuleWriteFailure(error, MODULE_WRITE_DRAFT, binding) : null;
+          if (refusal && refusal.code !== "write_unverified") throw refusal;
+          throw error;
+        }
         // Retain a safely bound returned identifier as an inspection clue even
         // when its field/status envelope fails the full success validation.
         returnedRevisionId = reportedModuleRevisionId(writerResult, expected);
@@ -679,7 +874,8 @@ export function createDrupalPrimitiveHandlers() {
           fields: stored.fields,
           pendingDraft: { nodeId: input.nodeId, revisionId: stored.revision_id, language, beforeFields: plan.preimage.fields, fields: stored.fields },
         };
-      } catch {
+      } catch (error) {
+        if (error instanceof DrupalEditRefusal) throw error;
         throw new Error("Protected draft verification failed after writer dispatch. A draft may have been saved; inspection required before retrying or claiming success. "
           + (returnedRevisionId === undefined ? "" : `The writer returned revision ${returnedRevisionId} for node ${nid} in language ${language}. `)
           + "The exact stored result could not be verified.");
@@ -711,10 +907,25 @@ export function createDrupalPrimitiveHandlers() {
     },
 
     drupal_node_publish: async (request: ExtensionPrimitiveRequest<unknown>) => {
-      const input = nodeGetSchema.parse(request.input);
+      const input = nodePublishSchema.parse(request.input);
+      const edit = editArgumentsOf(input);
+      if (edit.fields !== undefined && edit.binding === undefined) {
+        throw new Error("drupal_node_publish takes fields only with expectedBinding.");
+      }
+      const binding = edit.binding === undefined ? undefined : checkEditBinding(edit.binding, { nid: Number(input.nodeId) });
+      if (binding?.published) throw REFUSAL.publishedBinding();
       const instance = await resolveInstance(input.instanceId);
       // cinatra#409 — per-user / per-instance write authorization (fail-closed).
       await requireWriteAuthority(input.instanceId, "drupal_node_publish");
+      if (binding) {
+        let fields: Record<string, unknown> | undefined;
+        if (edit.fields !== undefined) {
+          fields = Object.fromEntries(Object.entries(edit.fields).filter(([, value]) => value !== ""));
+          if (Object.keys(fields).length === 0) throw new Error("All submitted fields were empty strings — nothing to update.");
+        }
+        // Never mcp_publish_content: the module publishes only an unchanged page.
+        return writeUnpublishedBound(instance, input.nodeId, binding, fields, true);
+      }
       // mcp_publish_content — pass nid as string (same strtolower() fix as drupal_node_update)
       const nid = parseInt(input.nodeId, 10);
       if (!Number.isFinite(nid) || nid <= 0) {

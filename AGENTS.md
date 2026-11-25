@@ -4,7 +4,7 @@ Package-specific guidance for `@cinatra-ai/drupal-connector`. Read alongside the
 
 ## Package role
 
-Exposes 8 MCP primitives that proxy to the `drupal/mcp_tools` Streamable HTTP endpoint (`/_mcp_tools`) on each configured Drupal site (plus an A2A blocking dispatch primitive `drupal_content_editor_run`). Also provides the `DrupalSettingsPage` RSC for `/configuration/llm/drupal` and wires into `src/lib/mcp-server.ts` via `createDrupalModule()`.
+Exposes 9 MCP primitives that proxy to the `drupal/mcp_tools` Streamable HTTP endpoint (`/_mcp_tools`) on each configured Drupal site (plus an A2A blocking dispatch primitive `drupal_content_editor_run`). Also provides the `DrupalSettingsPage` RSC for `/configuration/llm/drupal` and wires into `src/lib/mcp-server.ts` via `createDrupalModule()`.
 
 ## Primitive names and tool name mapping
 
@@ -15,13 +15,38 @@ The Cinatra primitive names (what the LLM calls) map to `drupal/mcp_tools` tool 
 | `drupal_status` | — | Local status check, no MCP call |
 | `drupal_instances_list` | — | Reads from DB; returns rows verbatim; credentials live only in the Nango vault and are resolved at call time |
 | `drupal_node_get` | `mcp_jsonapi_list_entities`; `cinatra_read_protected_revision` only when that call throws; `mcp_tools_get_recent_content` when that call returns no node or the module read fails too | The module reader serves an endpoint that lists only the Cinatra module tools; it is not tried when the generic read answers without the node. **No get-by-ID tool exists** — pulls the recent-content list and finds the node by `id` / `nid`; `mcp_tools_search_content` requires ≥3-char queries and does not support nid-specific lookup |
-| `drupal_node_update` | `mcp_update_content` | `nid` sent as a string (PHP `strtolower()` type fix); maps `fields` input → `updates` arg |
-| `drupal_node_create_draft_revision` | `cinatra_read_protected_revision` + `cinatra_write_protected_draft` in the existing Cinatra module | SAME nodeId + fields + optional exact language; atomic draft and independent exact-revision readback |
+| `drupal_node_read_for_edit` | `cinatra_read_protected_revision` without `revision_id`, only | The read a bound edit starts from: every editable field value and the module's `binding`. Declared `passthroughStep: "read"`, no `outward`. Writes nothing |
+| `drupal_node_update` | `mcp_update_content`; with `expectedBinding`: `cinatra_read_protected_revision` (field structure) + `cinatra_write_unpublished` | `nid` sent as a string (PHP `strtolower()` type fix); maps `fields` input → `updates` arg |
+| `drupal_node_create_draft_revision` | `cinatra_read_protected_revision` + `cinatra_write_protected_draft` in the existing Cinatra module | SAME nodeId + fields + optional exact language; atomic draft and independent exact-revision readback. With `expectedBinding` the writer gets the binding's values |
 | `drupal_node_list` | `mcp_tools_get_recent_content` | Returns `{ total, sorted_by, content: [...] }`; the handler unwraps the `content` array |
-| `drupal_node_publish` | `mcp_publish_content` | `nid` sent as a string + `publish: true` |
+| `drupal_node_publish` | `mcp_publish_content`; with `expectedBinding`: `cinatra_publish_unpublished`, or with `fields` as well `cinatra_read_protected_revision` + `cinatra_write_unpublished` with `publish: true` | `nid` sent as a string + `publish: true` |
 | `drupal_content_editor_run` | — | A2A blocking dispatch to `wayflow-drupal-content-editor` (port 3020). Not an `mcp_tools` call |
 
 Tool names were discovered by inspecting a live Drupal 11 + `drupal/mcp_tools ^1.0@beta` instance in 2026-04. The live instance exposed 29 tools.
+
+## Writes bound to the reviewed read (cinatra#3745, owner decision 1234 A)
+
+A flow edits a page without a model: `drupal_node_read_for_edit` reads it, a person reviews the change, and one publishing step writes it with the read's `binding`. The write happens only if the page is unchanged since that read.
+
+- `binding` (`src/integration/edit-binding.ts`, `EditBinding`) holds `nid`, `language`, `published`, `expected_default_revision_id`, `expected_latest_revision_id`, `expected_changed`, `workflow_fingerprint`, `preimage_fingerprint`: the module's own input names, so a flow passes the object on unchanged. `preimage_fingerprint` covers every translation's stored values and names the bound translation.
+- The write tools take it as `expectedBinding` (or `expectedBindingJson`). The connector checks only its shape (every member, its type, no other member, the call's node and language) and refuses a mismatch with `invalid_binding`. The Cinatra module compares the values under the node lock.
+- Unpublished page: `drupal_node_update` writes through `cinatra_write_unpublished`; `drupal_node_publish` publishes through `cinatra_publish_unpublished`, and with `fields` it writes and publishes in one save (`cinatra_write_unpublished` with `publish: true`). Publishing stays on `drupal_node_publish`, the tool declared `outward`; `drupal_node_update` refuses `publish: true`. Published page: `drupal_node_create_draft_revision` passes the binding's revision ids and fingerprints to `cinatra_write_protected_draft` in place of its own fresh read, which then only supplies the draft state and the stored item structure.
+- A bound write never falls back to `mcp_update_content` / `mcp_publish_content`. Before the write it reads the site's tool list (`listDrupalMcpToolNames`); a missing module tool refuses with `module_capability_missing`. A bound draft also needs `cinatra_write_unpublished`, the marker of the module version that binds the translation.
+- Without `expectedBinding` every tool behaves as before. `fields` / `fieldsJson` and `expectedBinding` / `expectedBindingJson` are exclusive pairs; the JSON text is bounded at `JSON_ARGUMENT_MAX_BYTES` (256 KiB, UTF-8 bytes), must be a plain object, and is refused with fixed messages that never repeat the text.
+- Refusals are thrown as `<code>: <fixed text>` and never repeat page content or the site's text (`mapModuleWriteFailure`):
+
+  | Code | Cause |
+  |---|---|
+  | `node_changed` | the module's changed revision, changed time, workflow, values or publication refusals; a pending revision when the read had none |
+  | `pending_revision` | a pending revision that already existed at the read |
+  | `permission_denied` | the module's edit, publish, workflow-state, field-access or MCP-permission refusals |
+  | `invalid_input` | the module's request-shape, unknown-field, invalid-value or text-format refusals; a scalar edit the stored structure cannot take |
+  | `refused` | any other module refusal text |
+  | `write_unverified` | a failure that is not a module refusal, the module's "inspect before retrying" failures, or a result that is not the expected stored revision |
+  | `invalid_binding`, `wrong_page_state`, `module_capability_missing`, `read_unavailable` | connector checks before any write |
+
+  On the protected draft an unverified failure keeps the existing "inspection required" message.
+- `PASSTHROUGH_STEPS` in `src/mcp/registry.ts` declares `passthroughStep: "read"` on `drupal_node_read_for_edit` and `"publishing"` on the three write tools. A host that reads the field serves a "read" tool to a verified flow step with no person's decision (only on a registration with no `outward`), and a "publishing" tool only to a publishing step whose card a person released. Never declare "read" on a tool that can reach a write.
 
 ## Key implementation invariants
 
