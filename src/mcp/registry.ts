@@ -155,6 +155,26 @@ const PASSTHROUGH_STEPS: Record<string, { passthroughStep: "read" | "publishing"
   drupal_node_publish: { passthroughStep: "publishing" },
 };
 
+// cinatra#3745: a bound write answers every refusal with a code a flow can
+// branch on (`runBound` in ../integration/edit-binding). The server validates a
+// call against the registered schema BEFORE the handler runs, and its errors
+// carry no code, so the three write tools register a schema that publishes
+// exactly the same JSON Schema on tools/list but accepts any value: every
+// property is `unknown` carrying its original JSON Schema as metadata, and
+// a strict schema's unknown keys pass. The handler then parses with the real schema, inside the
+// bound wrapper on a bound call (an unbound call gets that schema's error).
+const HANDLER_VALIDATED_TOOL_NAMES = new Set(["drupal_node_update", "drupal_node_publish", "drupal_node_create_draft_revision"]);
+
+function handlerValidated(schema: z.ZodTypeAny): z.ZodTypeAny {
+  const published = z.toJSONSchema(schema, { io: "input" }) as { properties?: Record<string, Record<string, unknown>> } & Record<string, unknown>;
+  const { $schema: _schema, properties = {}, ...objectKeywords } = published;
+  const shape = Object.fromEntries(Object.entries(properties).map(([name, property]) => [name, z.unknown().optional().meta(property)]));
+  // A strict schema's unknown keys must reach the handler, which refuses them;
+  // a stripping schema drops them here exactly as the handler would.
+  const object = objectKeywords.additionalProperties === false ? z.object(shape).catchall(z.unknown()) : z.object(shape);
+  return object.meta(objectKeywords);
+}
+
 export function registerDrupalPrimitives(server: ExtensionMcpToolServer): void {
   const handlers = createDrupalPrimitiveHandlers();
 
@@ -177,7 +197,7 @@ export function registerDrupalPrimitives(server: ExtensionMcpToolServer): void {
       {
         title: name,
         description: meta.description,
-        inputSchema: meta.inputSchema,
+        inputSchema: HANDLER_VALIDATED_TOOL_NAMES.has(name) ? handlerValidated(meta.inputSchema) : meta.inputSchema,
         ...(OUTWARD_TOOL_NAMES.has(name) ? OUTWARD : {}),
         ...(PASSTHROUGH_STEPS[name] ?? {}),
       },

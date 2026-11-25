@@ -7,14 +7,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 vi.mock("../lib/drupal-mcp-client", () => ({ callDrupalMcp: vi.fn(), listDrupalMcpToolNames: vi.fn() }));
+// Pass-through spies, so a test can inject an arbitrary throw at one stage of
+// a bound write (before any call, between read and write, after the write).
+vi.mock("../integration/edit-binding", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../integration/edit-binding")>();
+  return { ...real, checkEditBinding: vi.fn(real.checkEditBinding), moduleBindingArgs: vi.fn(real.moduleBindingArgs), verifyUnpublishedWrite: vi.fn(real.verifyUnpublishedWrite) };
+});
 import { callDrupalMcp, listDrupalMcpToolNames } from "../lib/drupal-mcp-client";
-import { createDrupalPrimitiveHandlers } from "../mcp/handlers";
+import { createDrupalPrimitiveHandlers, nodeUpdateSchema, nodePublishSchema, nodeCreateDraftSchema } from "../mcp/handlers";
+import { z } from "zod";
 import { registerDrupalPrimitives } from "../mcp/registry";
 import { registerDrupalConnector } from "../deps";
 import { MODULE_READ_REVISION as READER, MODULE_WRITE_DRAFT as DRAFT_WRITER, PROTECTED_DRAFT_CONTRACT, type StoredFieldItems } from "../integration/module-protected-draft";
 import {
   MODULE_WRITE_UNPUBLISHED as WRITE_UNPUBLISHED, MODULE_PUBLISH_UNPUBLISHED as PUBLISH_UNPUBLISHED,
-  JSON_ARGUMENT_MAX_BYTES, type EditBinding,
+  JSON_ARGUMENT_MAX_BYTES, checkEditBinding, moduleBindingArgs, verifyUnpublishedWrite, type EditBinding,
 } from "../integration/edit-binding";
 
 const instance = { id: "site", name: "Site", siteUrl: "https://example.test", nangoConnectionId: "site", providerConfigKey: "drupal", createdAt: "", updatedAt: "" };
@@ -23,7 +30,7 @@ const C = "c".repeat(64);
 const before: StoredFieldItems = { title: [{ value: "Old" }], body: [{ value: "Old body", format: "basic_html", summary: "Keep" }] };
 const unpublishedRead = { node_id: 7, uuid: "uuid-7", language: "de", default_revision_id: 10, latest_revision_id: 10, is_default_revision: true, is_published: false, changed: 1700000000, moderated: false, canonical_moderation_field: false, workflow_fingerprint: A, preimage_fingerprint: C, draft_states: {}, allowed_draft_states: [], available_fields: ["body", "title"] };
 const publishedRead = { ...unpublishedRead, is_published: true, moderated: true, canonical_moderation_field: true, draft_states: { draft: { published: false, default_revision: false } }, allowed_draft_states: ["draft"] };
-const binding: EditBinding = { nid: 7, language: "de", published: false, expected_default_revision_id: 10, expected_latest_revision_id: 10, expected_changed: 1700000000, workflow_fingerprint: A, preimage_fingerprint: C };
+const binding: EditBinding = { instanceId: "site", nid: 7, language: "de", published: false, expected_default_revision_id: 10, expected_latest_revision_id: 10, expected_changed: 1700000000, workflow_fingerprint: A, preimage_fingerprint: C };
 const publishedBinding: EditBinding = { ...binding, published: true };
 const envelope = (result: unknown) => ({ contract: PROTECTED_DRAFT_CONTRACT, result });
 const authority = vi.fn(async () => {});
@@ -94,7 +101,7 @@ describe("drupal_node_read_for_edit", () => {
     expect(listDrupalMcpToolNames).not.toHaveBeenCalled();
     expect(authority).not.toHaveBeenCalled();
     expect(result).toEqual({
-      nodeId: "7", nid: 7, uuid: "uuid-7", language: "de", published: false,
+      instanceId: "site", nodeId: "7", nid: 7, uuid: "uuid-7", language: "de", published: false,
       fields: { title: "Old", body: "Old body" },
       stored_fields: before,
       available_fields: ["body", "title"],
@@ -204,6 +211,8 @@ describe("drupal_node_update with expectedBinding", () => {
     ["an unsafe language", { ...binding, language: "de;" }],
     ["a non-boolean published", { ...binding, published: "false" }],
     ["an extra member", { ...binding, other: 1 }],
+    ["no instance", (({ instanceId: _i, ...rest }) => rest)(binding)],
+    ["an empty instance", { ...binding, instanceId: "" }],
     ["a non-object", "binding"],
   ])("refuses %s before any call", async (_name, expectedBinding) => {
     expect(await failure(call("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding }))).toMatch(/^invalid_binding: |Invalid|expected/i);
@@ -212,7 +221,7 @@ describe("drupal_node_update with expectedBinding", () => {
   });
 
   it("refuses a binding for another page", async () => {
-    expect(await failure(call("drupal_node_update", { instanceId: "site", nodeId: "8", fields: { title: "New" }, expectedBinding: binding }))).toMatch(/^invalid_binding: .*another page or language/);
+    expect(await failure(call("drupal_node_update", { instanceId: "site", nodeId: "8", fields: { title: "New" }, expectedBinding: binding }))).toMatch(/^invalid_binding: .*another Drupal instance, page or language/);
     expect(callDrupalMcp).not.toHaveBeenCalled();
   });
 
@@ -233,7 +242,7 @@ describe("drupal_node_update with expectedBinding", () => {
   });
 
   it.each(["drupal_node_update", "drupal_node_publish"])("%s answers an unknown instance with invalid_input on the bound path", async (tool) => {
-    expect(await failure(call(tool as never, { instanceId: "other", nodeId: "7", fields: { title: "New" }, expectedBinding: binding }))).toMatch(/^invalid_input: /);
+    expect(await failure(call(tool as never, { instanceId: "other", nodeId: "7", fields: { title: "New" }, expectedBinding: { ...binding, instanceId: "other" } }))).toMatch(/^invalid_input: /);
     expect(callDrupalMcp).not.toHaveBeenCalled();
   });
 
@@ -376,7 +385,7 @@ describe("drupal_node_create_draft_revision with expectedBinding", () => {
   it("keeps the inspection message for an unrecognized failure after dispatch", async () => {
     routeDraft({ writeThrows: "socket closed" });
     const message = await failure(call("drupal_node_create_draft_revision", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: publishedBinding }));
-    expect(message).toMatch(/inspection required/i);
+    expect(message).toMatch(/^write_unverified: .*inspection required/i);
     expect(message).not.toMatch(/socket closed/);
   });
 });
@@ -405,13 +414,15 @@ describe("JSON text arguments", () => {
   });
   it.each<[string, Record<string, unknown>, RegExp]>([
     ["fields and fieldsJson", { fields: { title: "a" }, fieldsJson: "{}" }, /^Give the field updates as fields or as fieldsJson, not both\.$/],
-    ["expectedBinding and expectedBindingJson", { fields: { title: "a" }, expectedBinding: binding, expectedBindingJson: JSON.stringify(binding) }, /^Give the binding as expectedBinding or as expectedBindingJson, not both\.$/],
+    ["expectedBinding and expectedBindingJson", { fields: { title: "a" }, expectedBinding: binding, expectedBindingJson: JSON.stringify(binding) }, /^invalid_binding: Give the binding as expectedBinding or as expectedBindingJson, not both\.$/],
     ["text that is not JSON", { fieldsJson: `{${SECRET}` }, /^fieldsJson must be the text of a JSON object\.$/],
     ["a JSON array", { fieldsJson: JSON.stringify([SECRET]) }, /^fieldsJson must be the text of a JSON object\.$/],
     ["JSON null", { fieldsJson: "null" }, /^fieldsJson must be the text of a JSON object\.$/],
     ["a JSON number", { fieldsJson: "7" }, /^fieldsJson must be the text of a JSON object\.$/],
     ["a JSON string", { fieldsJson: JSON.stringify(SECRET) }, /^fieldsJson must be the text of a JSON object\.$/],
-    ["a binding array", { fields: { title: "a" }, expectedBindingJson: JSON.stringify([SECRET]) }, /^expectedBindingJson must be the text of a JSON object\.$/],
+    ["a binding array", { fields: { title: "a" }, expectedBindingJson: JSON.stringify([SECRET]) }, /^invalid_binding: expectedBindingJson must be the text of a JSON object\.$/],
+    ["bound text that is not JSON", { fieldsJson: `{${SECRET}`, expectedBinding: binding }, /^invalid_input: fieldsJson must be the text of a JSON object\.$/],
+    ["bound fields and fieldsJson", { fields: { title: "a" }, fieldsJson: "{}", expectedBinding: binding }, /^invalid_input: Give the field updates as fields or as fieldsJson, not both\.$/],
   ])("refuses %s with a fixed message that never echoes the text", async (_name, extra, expected) => {
     const message = await failure(call("drupal_node_update", { instanceId: "site", nodeId: "7", ...extra }));
     expect(message).toMatch(expected);
@@ -426,8 +437,9 @@ describe("JSON text arguments", () => {
     // Each "é" is one UTF-16 unit but two UTF-8 bytes.
     const multiByte = JSON.stringify({ title: "é".repeat(JSON_ARGUMENT_MAX_BYTES / 2) });
     expect(multiByte.length).toBeLessThan(JSON_ARGUMENT_MAX_BYTES);
-    expect(await failure(call("drupal_node_update", { instanceId: "site", nodeId: "7", fieldsJson: multiByte, expectedBinding: binding }))).toBe(`fieldsJson is larger than ${JSON_ARGUMENT_MAX_BYTES} bytes.`);
-    expect(await failure(call("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "a" }, expectedBindingJson: " ".repeat(JSON_ARGUMENT_MAX_BYTES + 1) }))).toBe(`expectedBindingJson is larger than ${JSON_ARGUMENT_MAX_BYTES} bytes.`);
+    expect(await failure(call("drupal_node_update", { instanceId: "site", nodeId: "7", fieldsJson: multiByte, expectedBinding: binding }))).toBe(`invalid_input: fieldsJson is larger than ${JSON_ARGUMENT_MAX_BYTES} bytes.`);
+    expect(await failure(call("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "a" }, expectedBindingJson: " ".repeat(JSON_ARGUMENT_MAX_BYTES + 1) }))).toBe(`invalid_binding: expectedBindingJson is larger than ${JSON_ARGUMENT_MAX_BYTES} bytes.`);
+    expect(await failure(call("drupal_node_update", { instanceId: "site", nodeId: "7", fieldsJson: multiByte }))).toBe(`fieldsJson is larger than ${JSON_ARGUMENT_MAX_BYTES} bytes.`);
     expect(callDrupalMcp).not.toHaveBeenCalled();
   });
 });
@@ -507,6 +519,31 @@ describe("without expectedBinding every path is unchanged", () => {
 // the registered input schema (dropping undeclared keys) before the handler
 // runs, so these cases go through tools/call, not the handler directly.
 describe("through the registered MCP server", () => {
+  async function toolsList(): Promise<{ name: string; inputSchema: Record<string, unknown> }[]> {
+    const srv = new McpServer({ name: "drupal-mcp-connector-test", version: "0.0.0" });
+    registerDrupalPrimitives({ registerTool: (n: string, c: unknown, h: unknown) => (srv.registerTool as (...a: unknown[]) => unknown)(n, c, h) } as never);
+    const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    await srv.connect(transport);
+    try {
+      const res = await transport.handleRequest(new Request("https://cinatra.test/api/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-11-25" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      }));
+      return ((await res.json()) as { result: { tools: { name: string; inputSchema: Record<string, unknown> }[] } }).result.tools;
+    } finally {
+      await transport.close();
+    }
+  }
+
+  it.each<[string, z.ZodTypeAny]>([["drupal_node_update", nodeUpdateSchema], ["drupal_node_publish", nodePublishSchema], ["drupal_node_create_draft_revision", nodeCreateDraftSchema]])(
+    "%s publishes exactly its real input schema on tools/list", async (name, schema) => {
+      const published = (await toolsList()).find((t) => t.name === name)?.inputSchema ?? {};
+      const { $schema: _a, ...actual } = published;
+      const { $schema: _b, ...expected } = z.toJSONSchema(schema, { io: "input" }) as Record<string, unknown>;
+      expect(actual).toEqual(expected);
+    });
+
   async function toolsCall(name: string, args: Record<string, unknown>): Promise<{ isError: boolean; text: string }> {
     const srv = new McpServer({ name: "drupal-mcp-connector-test", version: "0.0.0" });
     registerDrupalPrimitives({ registerTool: (n: string, c: unknown, h: unknown) => (srv.registerTool as (...a: unknown[]) => unknown)(n, c, h) } as never);
@@ -558,6 +595,75 @@ describe("through the registered MCP server", () => {
     const result = await toolsCall("drupal_node_publish", { instanceId: "site", nodeId: "7", expectedBinding: binding });
     expect(result.isError).toBe(false);
     expect(toolsCalled()).toEqual([PUBLISH_UNPUBLISHED]);
+  });
+
+  it.each(["drupal_node_update", "drupal_node_publish", "drupal_node_create_draft_revision"])("%s refuses a binding read from another Drupal instance before any call", async (tool) => {
+    const b = tool === "drupal_node_create_draft_revision" ? publishedBinding : binding;
+    const result = await toolsCall(tool, { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: { ...b, instanceId: "clone" } });
+    expect(result.text).toMatch(/^invalid_binding: /);
+    expect(callDrupalMcp).not.toHaveBeenCalled();
+    expect(listDrupalMcpToolNames).not.toHaveBeenCalled();
+    expect(authority).not.toHaveBeenCalled();
+  });
+
+  it("returns the instance in the binding and at the top level of the read", async () => {
+    const result = await toolsCall("drupal_node_read_for_edit", { instanceId: "site", nid: "7" });
+    const read = JSON.parse(result.text) as { instanceId: string; binding: EditBinding };
+    expect(read.instanceId).toBe("site");
+    expect(read.binding.instanceId).toBe("site");
+  });
+
+  it("never sends the connector's instance to the module", async () => {
+    await toolsCall("drupal_node_publish", { instanceId: "site", nodeId: "7", expectedBinding: binding });
+    expect(calls()[0][2]).not.toHaveProperty("instanceId");
+    expect(calls()[0][2]).not.toHaveProperty("published");
+  });
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ["malformed fieldsJson", { fieldsJson: "{not json" }, "invalid_input"],
+    ["oversized fieldsJson", { fieldsJson: JSON.stringify({ title: "x".repeat(JSON_ARGUMENT_MAX_BYTES) }) }, "invalid_input"],
+    ["a non-string fieldsJson", { fieldsJson: 7 }, "invalid_input"],
+    ["a non-object expectedBinding", { fields: { title: "a" }, expectedBinding: "x" }, "invalid_binding"],
+  ])("codes %s on a bound call through the server", async (_name, extra, code) => {
+    const result = await toolsCall("drupal_node_update", { instanceId: "site", nodeId: "7", expectedBinding: binding, ...extra });
+    expect(result.isError).toBe(true);
+    expect(result.text.startsWith(`${code}: `)).toBe(true);
+    expect(callDrupalMcp).not.toHaveBeenCalled();
+  });
+
+  it("codes an unknown key on a bound protected draft and still refuses it without a binding", async () => {
+    const bound = await toolsCall("drupal_node_create_draft_revision", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: publishedBinding, status: 1 });
+    expect(bound.text).toMatch(/^invalid_input: /);
+    const unbound = await toolsCall("drupal_node_create_draft_revision", { instanceId: "site", nodeId: "7", fields: { title: "New" }, status: 1 });
+    expect(unbound.isError).toBe(true);
+    expect(callDrupalMcp).not.toHaveBeenCalled();
+  });
+
+  // The one wrapper: an arbitrary throw at each stage leaves as a coded refusal.
+  it.each<[string, () => void, string, number]>([
+    ["before any call", () => vi.mocked(checkEditBinding).mockImplementationOnce(() => { throw new TypeError("arbitrary Secret page words"); }), "invalid_input", 0],
+    ["between the read and the write", () => vi.mocked(moduleBindingArgs).mockImplementationOnce(() => { throw new TypeError("arbitrary Secret page words"); }), "refused", 0],
+    ["after the write call was sent", () => vi.mocked(verifyUnpublishedWrite).mockImplementationOnce(() => { throw new TypeError("arbitrary Secret page words"); }), "write_unverified", 1],
+  ])("codes an arbitrary throw %s", async (_stage, inject, code, writesSent) => {
+    inject();
+    const result = await toolsCall("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: binding });
+    expect(result.isError).toBe(true);
+    expect(result.text.startsWith(`${code}: `)).toBe(true);
+    expect(result.text).not.toContain("Secret page words");
+    expect(calls().filter((c) => c[1] === WRITE_UNPUBLISHED)).toHaveLength(writesSent);
+  });
+
+  it("codes an arbitrary throw after the protected draft's write call was sent", async () => {
+    vi.mocked(callDrupalMcp).mockImplementation(async (_i, tool, raw) => {
+      const args = raw as Record<string, unknown>;
+      if (tool === "mcp_jsonapi_list_entities") return { items: [{ entity_type: "node", id: 7, uuid: "uuid-7", bundle: "article", status: true, fields: { nid: 7, langcode: "de", title: "Old" } }] };
+      if (tool === READER) return envelope({ ...publishedRead, fields: Object.fromEntries((args.fields as string[]).map((n) => [n, before[n]])) });
+      if (tool === DRAFT_WRITER) throw new TypeError("arbitrary Secret page words");
+      throw new Error(`Unexpected tool: ${tool}`);
+    });
+    const result = await toolsCall("drupal_node_create_draft_revision", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: publishedBinding });
+    expect(result.text).toMatch(/^write_unverified: .*inspection required/i);
+    expect(result.text).not.toContain("Secret page words");
   });
 
   it("keeps the existing message for an unbound drupal_node_update without fields", async () => {

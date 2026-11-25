@@ -12,9 +12,12 @@ export const MODULE_WRITE_UNPUBLISHED = "cinatra_write_unpublished";
 export const MODULE_PUBLISH_UNPUBLISHED = "cinatra_publish_unpublished";
 
 /** The binding of one module read (`cinatra_read_protected_revision` without
- * `revision_id`), as `drupal_node_read_for_edit` returns it. The member names
- * are the module's own input names, so a flow passes the object on unchanged. */
+ * `revision_id`), as `drupal_node_read_for_edit` returns it. Every module
+ * member carries the module's own input name; `instanceId` (the connector
+ * instance the page was read from) and `published` are the connector's own and
+ * are never sent to the module. A flow passes the object on unchanged. */
 export type EditBinding = {
+  instanceId: string;
   nid: number;
   language: string;
   published: boolean;
@@ -27,7 +30,7 @@ export type EditBinding = {
 
 const BINDING_KEYS = [
   "expected_changed", "expected_default_revision_id", "expected_latest_revision_id",
-  "language", "nid", "preimage_fingerprint", "published", "workflow_fingerprint",
+  "instanceId", "language", "nid", "preimage_fingerprint", "published", "workflow_fingerprint",
 ] as const;
 
 /** A refusal with a stable code a flow can branch on. The message is
@@ -49,7 +52,7 @@ export const REFUSAL = {
   invalidBinding: () => new DrupalEditRefusal("invalid_binding",
     "expectedBinding must be the binding object from drupal_node_read_for_edit, with every member present and well formed and no other member. Nothing was written."),
   bindingMismatch: () => new DrupalEditRefusal("invalid_binding",
-    "expectedBinding names another page or language than this call. Nothing was written."),
+    "expectedBinding names another Drupal instance, page or language than this call. Nothing was written."),
   publishedBinding: () => new DrupalEditRefusal("wrong_page_state",
     "The binding is for a published page; save the change as a draft with drupal_node_create_draft_revision. Nothing was written."),
   unpublishedBinding: () => new DrupalEditRefusal("wrong_page_state",
@@ -86,6 +89,13 @@ export const REFUSAL = {
     "The site's protected draft read does not allow a draft of this page (for example it is not moderated or no single unpublished draft state is permitted). Nothing was written."),
   updateDoesNotPublish: () => new DrupalEditRefusal("invalid_input",
     "drupal_node_update does not publish. Publish with drupal_node_publish; with expectedBinding and fields it writes and publishes in one save. Nothing was written."),
+  invalidArguments: () => new DrupalEditRefusal("invalid_input",
+    "The arguments of this bound write are invalid. Nothing was written."),
+  stoppedBeforeWrite: () => new DrupalEditRefusal("refused",
+    "The bound write stopped before the write was sent. Nothing was written. Read the page again before retrying."),
+  draftUnverified: (revisionId: number | undefined) => new DrupalEditRefusal("write_unverified",
+    "The draft write was sent but its stored result could not be verified; a draft may have been saved. Inspection required before retrying or claiming success."
+    + (revisionId === undefined ? "" : ` The writer returned revision ${revisionId}.`)),
   refused: () => new DrupalEditRefusal("refused",
     "The site refused the write. Read the page again before retrying."),
   writeUnverified: () => new DrupalEditRefusal("write_unverified",
@@ -103,11 +113,12 @@ const positive = (value: unknown): value is number => typeof value === "number" 
 /** Check the binding's shape only: every member present with its type, no
  * other member, and the same page and language as the call. The values are
  * compared by the module under the node lock, never here. */
-export function checkEditBinding(value: unknown, call: { nid: number; language?: string }): EditBinding {
+export function checkEditBinding(value: unknown, call: { instanceId: string; nid: number; language?: string }): EditBinding {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw REFUSAL.invalidBinding();
   const b = value as Record<string, unknown>;
   const keys = Object.keys(b).sort();
   if (keys.length !== BINDING_KEYS.length || keys.some((key, i) => key !== BINDING_KEYS[i])
+    || typeof b.instanceId !== "string" || b.instanceId === ""
     || !positive(b.nid) || typeof b.language !== "string" || !LANGCODE.test(b.language)
     || typeof b.published !== "boolean"
     || !positive(b.expected_default_revision_id) || !positive(b.expected_latest_revision_id)
@@ -116,9 +127,10 @@ export function checkEditBinding(value: unknown, call: { nid: number; language?:
     || typeof b.preimage_fingerprint !== "string" || !FINGERPRINT.test(b.preimage_fingerprint)) {
     throw REFUSAL.invalidBinding();
   }
-  if (b.nid !== call.nid || (call.language !== undefined && b.language !== call.language)) throw REFUSAL.bindingMismatch();
+  if (b.instanceId !== call.instanceId || b.nid !== call.nid
+    || (call.language !== undefined && b.language !== call.language)) throw REFUSAL.bindingMismatch();
   return {
-    nid: b.nid, language: b.language, published: b.published,
+    instanceId: b.instanceId, nid: b.nid, language: b.language, published: b.published,
     expected_default_revision_id: b.expected_default_revision_id,
     expected_latest_revision_id: b.expected_latest_revision_id,
     expected_changed: b.expected_changed,
@@ -126,7 +138,8 @@ export function checkEditBinding(value: unknown, call: { nid: number; language?:
   };
 }
 
-/** The binding's members as the module's tools take them (no `published`). */
+/** The binding's members as the module's tools take them: never the
+ * connector's own `instanceId` and `published`. */
 export function moduleBindingArgs(binding: EditBinding): Record<string, unknown> {
   return {
     nid: binding.nid, language: binding.language,
@@ -308,4 +321,60 @@ export function boundDraftReadRefusal(value: unknown, binding: EditBinding): Dru
       ? REFUSAL.nodeChanged() : REFUSAL.pendingRevision();
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// The one place that codes every exit of a bound write
+// ---------------------------------------------------------------------------
+
+/** Whether the call is bound: either binding form is present. Decided from the
+ * raw arguments before anything else is parsed. */
+export function isBoundCall(input: unknown): boolean {
+  const raw = plainObject(input);
+  return raw !== null && (raw.expectedBinding !== undefined || raw.expectedBindingJson !== undefined);
+}
+
+/** How far a bound write got: a site call was made, the write call was sent. */
+export type BoundStage = { called: boolean; writeSent: boolean };
+
+const BINDING_ARGUMENT_NAMES = new Set(["expectedBinding", "expectedBindingJson"]);
+
+/** Run a bound write so that every error leaves it as a coded refusal: a coded
+ * refusal passes unchanged; any other error is `write_unverified` once the
+ * write call was sent, `refused` after an earlier site call, and before any
+ * call `invalid_binding` when it concerns only the binding arguments, else
+ * `invalid_input`. The fixed texts never repeat the input or the error. */
+export async function runBound<T>(body: (stage: BoundStage) => Promise<T>): Promise<T> {
+  const stage: BoundStage = { called: false, writeSent: false };
+  try {
+    return await body(stage);
+  } catch (error) {
+    if (error instanceof DrupalEditRefusal) throw error;
+    if (stage.writeSent) throw REFUSAL.writeUnverified();
+    if (stage.called) throw REFUSAL.stoppedBeforeWrite();
+    const issues = (error as { issues?: unknown } | null)?.issues;
+    if (Array.isArray(issues) && issues.length > 0
+      && issues.every((issue) => BINDING_ARGUMENT_NAMES.has(String((issue as { path?: unknown[] })?.path?.[0])))) {
+      throw REFUSAL.invalidBinding();
+    }
+    throw REFUSAL.invalidArguments();
+  }
+}
+
+/** The field updates and the binding of a write call, each from its object or
+ * JSON text form, the binding first. On a bound call a fixed argument refusal
+ * carries its code: `invalid_binding` for the binding, `invalid_input` for the
+ * fields. Without a binding the messages stay as they are. */
+export function editArgumentsOf(input: { fields?: Record<string, unknown>; fieldsJson?: string; expectedBinding?: Record<string, unknown>; expectedBindingJson?: string }, bound: boolean) {
+  const coded = <T>(code: string, read: () => T): T => {
+    try {
+      return read();
+    } catch (error) {
+      if (!bound || error instanceof DrupalEditRefusal) throw error;
+      throw new DrupalEditRefusal(code, (error as Error).message);
+    }
+  };
+  const binding = coded("invalid_binding", () => objectOrJsonText(input.expectedBinding, input.expectedBindingJson, BINDING_ARGUMENT));
+  const fields = coded("invalid_input", () => objectOrJsonText(input.fields, input.fieldsJson, FIELDS_ARGUMENT));
+  return { fields, binding };
 }
