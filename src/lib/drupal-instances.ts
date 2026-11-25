@@ -42,6 +42,7 @@
 // messages never embed credential material.
 
 import { randomUUID } from "node:crypto";
+import { UPDATED_AT_SYNTHESISED } from "../integration/edit-binding";
 
 import type {
   HostInstanceConnectionGateService,
@@ -208,6 +209,16 @@ function ownStringField(input: object, key: "orgId" | "runBy"): string {
   return field.value.trim();
 }
 
+/** Mark a row whose `updatedAt` the reader filled with the current time, so a
+ * bound edit never records that made-up value (`storedUpdatedAt`). The marker
+ * is a non-enumerable symbol: the row's shape and equality are unchanged. */
+function markSynthesisedUpdatedAt<T extends object>(stored: { updatedAt?: unknown }, row: T): T {
+  if (typeof stored.updatedAt !== "string") {
+    Object.defineProperty(row, UPDATED_AT_SYNTHESISED, { value: true, enumerable: false });
+  }
+  return row;
+}
+
 function normalizeSiteUrl(url: string): string {
   return trimTrailingSlashesLinear(url.trim());
 }
@@ -235,7 +246,7 @@ export function buildDrupalInstanceClient(deps: DrupalInstanceStoreDeps): Drupal
     return {
       instances: Array.isArray(settings.instances)
         ? settings.instances
-            .map((instance) => ({
+            .map((instance) => markSynthesisedUpdatedAt(instance, {
               id: String(instance.id ?? ""),
               name: String(instance.name ?? "").trim(),
               siteUrl: normalizeSiteUrl(String(instance.siteUrl ?? "")),

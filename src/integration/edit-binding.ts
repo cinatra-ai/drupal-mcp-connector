@@ -16,8 +16,8 @@ export const MODULE_PUBLISH_UNPUBLISHED = "cinatra_publish_unpublished";
  * member carries the module's own input name. The connector's own members are
  * never sent to the module: `instanceId` (the connector instance the page was
  * read from), `target` (`siteTarget` of that instance's site URL at the read),
- * `targetUpdatedAt` (the instance row's `updatedAt` at the read, or null when
- * the row has none or an empty one) and `published`. A flow passes the object on unchanged. */
+ * `targetUpdatedAt` (the instance row's STORED `updatedAt` at the read, or
+ * null when none is stored: `storedUpdatedAt`) and `published`. A flow passes the object on unchanged. */
 export type EditBinding = {
   instanceId: string;
   target: string;
@@ -54,11 +54,26 @@ export function siteTarget(siteUrl: string): string | null {
   return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
 }
 
+/** The instance reader (`getDrupalAPISettings`) fills a row with no stored
+ * `updatedAt` with the current time, for its other callers. It marks such a
+ * row with this non-enumerable symbol property, so the row's shape and
+ * equality stay the same for them. */
+export const UPDATED_AT_SYNTHESISED: unique symbol = Symbol.for("cinatra.drupal-mcp-connector.updated-at-synthesised") as never;
+
+/** The row's `updatedAt` only if it is really stored: null when the reader
+ * made it up, or when it is absent or empty. A row whose marker was lost (a
+ * copy) gives the made-up value, which then never matches: it refuses. */
+export function storedUpdatedAt(instance: { updatedAt?: string }): string | null {
+  if ((instance as Record<PropertyKey, unknown>)[UPDATED_AT_SYNTHESISED] === true) return null;
+  return typeof instance.updatedAt === "string" && instance.updatedAt !== "" ? instance.updatedAt : null;
+}
+
 /** The instance members of a binding, from the instance row the call resolved
- * once: the same row the call then uses for every site call. */
+ * once: the same row the call then uses for every site call. The read tool and
+ * the write check both use this function. */
 export function bindingTarget(instance: { siteUrl: string; updatedAt?: string }): { target: string; targetUpdatedAt: string | null } | null {
   const target = siteTarget(instance.siteUrl);
-  return target === null ? null : { target, targetUpdatedAt: typeof instance.updatedAt === "string" && instance.updatedAt !== "" ? instance.updatedAt : null };
+  return target === null ? null : { target, targetUpdatedAt: storedUpdatedAt(instance) };
 }
 
 /** A refusal with a stable code a flow can branch on. The message is

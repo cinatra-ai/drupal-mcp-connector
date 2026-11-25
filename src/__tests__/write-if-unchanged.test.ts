@@ -4,7 +4,7 @@
 // was based on. The read tool returns the module's binding; the write tools
 // pass that binding to the Cinatra module's own tools, which compare it again
 // under the node lock. Without a binding every write tool behaves as before.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 vi.mock("../lib/drupal-mcp-client", () => ({ callDrupalMcp: vi.fn(), listDrupalMcpToolNames: vi.fn() }));
 // Pass-through spies, so a test can inject an arbitrary throw at one stage of
@@ -18,6 +18,7 @@ import { createDrupalPrimitiveHandlers, nodeUpdateSchema, nodePublishSchema, nod
 import { z } from "zod";
 import { registerDrupalPrimitives } from "../mcp/registry";
 import { registerDrupalConnector } from "../deps";
+import { buildDrupalInstanceClient } from "../lib/drupal-instances";
 import { MODULE_READ_REVISION as READER, MODULE_WRITE_DRAFT as DRAFT_WRITER, PROTECTED_DRAFT_CONTRACT, type StoredFieldItems } from "../integration/module-protected-draft";
 import {
   MODULE_WRITE_UNPUBLISHED as WRITE_UNPUBLISHED, MODULE_PUBLISH_UNPUBLISHED as PUBLISH_UNPUBLISHED,
@@ -627,6 +628,49 @@ describe("through the registered MCP server", () => {
     const read = JSON.parse((await toolsCall("drupal_node_read_for_edit", { instanceId: "site", nid: "7" })).text) as { binding: EditBinding };
     expect(read.binding.target).toBe("https://example.test");
     expect(read.binding.targetUpdatedAt).toBe("2026-11-01T00:00:00.000Z");
+  });
+
+  describe("a legacy instance row with no stored updatedAt, served by the real instance reader", () => {
+    let stored: Record<string, unknown>;
+    beforeEach(() => {
+      stored = { id: "site", name: "Site", siteUrl: "https://Example.test/", nangoConnectionId: "site", providerConfigKey: "drupal" };
+      const client = buildDrupalInstanceClient({
+        connectorConfig: () => ({ read: <T,>() => ({ instances: [stored] }) as T, write: () => {} }),
+        nango: () => ({ providerConfigKeys: { drupal: "drupal" } }),
+        connectionGate: () => ({}),
+        warn: () => {},
+      } as never);
+      registerDrupalConnector({ decodeCursor: () => 0, buildListPage: (items, total) => ({ items, total }), dispatchContentEditor: async () => "{}", buildNangoBearerHeader: async () => ({ Authorization: "Bearer unit" }), listMcpInstances: () => client.getDrupalAPISettings().instances, probeMcp: async () => "registered", resolveMcpServerUrl: (u) => u, isPrivateUrl: () => false, isNangoConfigured: () => true, getApiStatus: async () => ({ instanceCount: 1, instances: [] }), saveInstance: vi.fn(), deleteInstance: vi.fn(), listInstanceStatuses: async () => [], requireInstanceWriteAuthority: authority });
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-11-25T08:00:00.000Z"));
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      deps();
+    });
+
+    async function readBinding(): Promise<EditBinding> {
+      return (JSON.parse((await toolsCall("drupal_node_read_for_edit", { instanceId: "site", nid: "7" })).text) as { binding: EditBinding }).binding;
+    }
+
+    it("records no made-up stamp and writes after the clock moved", async () => {
+      const read = await readBinding();
+      expect(read.targetUpdatedAt).toBeNull();
+      vi.setSystemTime(new Date("2026-11-25T09:30:00.000Z"));
+      route();
+      const result = await toolsCall("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: read });
+      expect(result.isError).toBe(false);
+      expect(writes()).toHaveLength(1);
+    });
+
+    it("refuses when the legacy row was saved (and got a real stamp) between the read and the write", async () => {
+      const read = await readBinding();
+      stored.updatedAt = "2026-11-25T08:10:00.000Z";
+      vi.mocked(callDrupalMcp).mockClear();
+      const result = await toolsCall("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: read });
+      expect(result.text).toMatch(/^invalid_binding: .*reconfigured/);
+      expect(callDrupalMcp).not.toHaveBeenCalled();
+    });
   });
 
   it.each<[string, Partial<typeof instance>]>([
