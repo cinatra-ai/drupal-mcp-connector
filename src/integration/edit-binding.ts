@@ -51,7 +51,12 @@ export function siteTarget(siteUrl: string): string | null {
     return null;
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-  return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
+  // Trailing slashes are trimmed by index, in linear time: the value can come
+  // from a caller's binding, and an anchored greedy pattern is quadratic there.
+  const path = url.pathname;
+  let end = path.length;
+  while (end > 0 && path.charCodeAt(end - 1) === 47) end--; // 47 = "/"
+  return `${url.protocol}//${url.host}${path.slice(0, end)}`;
 }
 
 /** The instance reader (`getDrupalAPISettings`) fills a row with no stored
