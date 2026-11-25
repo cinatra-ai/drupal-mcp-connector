@@ -603,13 +603,35 @@ describe("through the registered MCP server", () => {
     expect(toolsCalled()).toEqual([PUBLISH_UNPUBLISHED]);
   });
 
-  it.each(["drupal_node_update", "drupal_node_publish", "drupal_node_create_draft_revision"])("%s refuses a binding read from another Drupal instance before any call", async (tool) => {
+  it.each(["drupal_node_update", "drupal_node_publish", "drupal_node_create_draft_revision"])("%s refuses a binding whose instance is not the call's before any call (a mix-up, not a forgery)", async (tool) => {
     const b = tool === "drupal_node_create_draft_revision" ? publishedBinding : binding;
     const result = await toolsCall(tool, { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: { ...b, instanceId: "clone" } });
     expect(result.text).toMatch(/^invalid_binding: /);
     expect(callDrupalMcp).not.toHaveBeenCalled();
     expect(listDrupalMcpToolNames).not.toHaveBeenCalled();
     expect(authority).not.toHaveBeenCalled();
+  });
+
+  // The connector members are consistency checks, not authentication: a caller
+  // who rewrites them CONSISTENTLY to another instance it may write (values
+  // drupal_instances_list shows) passes the connector's checks, and the write
+  // goes to that instance under the caller's own write authority there. Only
+  // the module's comparison of the page values stands between it and a save.
+  it("accepts a binding rewritten consistently to another instance the caller may write: no authentication", async () => {
+    const clone = { ...instance, id: "clone", name: "Clone", siteUrl: "https://clone.example.test", nangoConnectionId: "clone", updatedAt: "2026-11-03T00:00:00.000Z" };
+    registerDrupalConnector({ decodeCursor: () => 0, buildListPage: (items, total) => ({ items, total }), dispatchContentEditor: async () => "{}", buildNangoBearerHeader: async () => ({ Authorization: "Bearer unit" }), listMcpInstances: () => [instance, clone], probeMcp: async () => "registered", resolveMcpServerUrl: (u) => u, isPrivateUrl: () => false, isNangoConfigured: () => true, getApiStatus: async () => ({ instanceCount: 2, instances: [] }), saveInstance: vi.fn(), deleteInstance: vi.fn(), listInstanceStatuses: async () => [], requireInstanceWriteAuthority: authority });
+    try {
+      const listed = (JSON.parse((await toolsCall("drupal_instances_list", {})).text) as { id: string; siteUrl: string; updatedAt: string }[]).find((i) => i.id === "clone");
+      expect(listed).toBeDefined();
+      const forged = { ...binding, instanceId: listed!.id, target: listed!.siteUrl, targetUpdatedAt: listed!.updatedAt };
+      const result = await toolsCall("drupal_node_update", { instanceId: "clone", nodeId: "7", fields: { title: "New" }, expectedBinding: forged });
+      expect(result.isError).toBe(false);
+      expect(authority).toHaveBeenCalledWith({ instanceId: "clone", primitiveName: "drupal_node_update" });
+      const write = calls().find((c) => c[1] === WRITE_UNPUBLISHED);
+      expect((write?.[0] as { id: string }).id).toBe("clone");
+    } finally {
+      deps();
+    }
   });
 
   it("returns the instance in the binding and at the top level of the read", async () => {

@@ -17,7 +17,18 @@ export const MODULE_PUBLISH_UNPUBLISHED = "cinatra_publish_unpublished";
  * never sent to the module: `instanceId` (the connector instance the page was
  * read from), `target` (`siteTarget` of that instance's site URL at the read),
  * `targetUpdatedAt` (the instance row's STORED `updatedAt` at the read, or
- * null when none is stored: `storedUpdatedAt`) and `published`. A flow passes the object on unchanged. */
+ * null when none is stored: `storedUpdatedAt`) and `published`. A flow passes the object on unchanged.
+ *
+ * TRUST BOUNDARY. The binding is data the caller hands back; nothing in it is
+ * authenticated (the host gives a connector no per-install sealing service).
+ * The connector members are consistency checks against accidents: a binding
+ * used with another instance than the call's, or an instance id re-pointed to
+ * another site or re-saved since the read. A caller who rewrites them
+ * consistently passes those checks. What authorises a write is the caller's
+ * write authority on the instance named in the call (the same authority the
+ * unbound forms of these tools need); what binds the reviewed state is the
+ * host's publish decision for the call, and the module's comparison of the
+ * page values under the node lock. */
 export type EditBinding = {
   instanceId: string;
   target: string;
@@ -41,8 +52,9 @@ const BINDING_KEYS = [
 /** What a connector instance points at: the normalised base URL of its site
  * URL, `<scheme>://<host>[:<port>]<base path>` with the scheme and host
  * lower-cased, a default port dropped, no user name or password, no query or
- * fragment, and no trailing slash. A clone at another address never has the
- * same value. Null when the URL is not an http(s) URL. Never a credential. */
+ * fragment, and no trailing slash. An instance re-pointed to another address
+ * gets another value. Null when the URL is not an http(s) URL. Never a
+ * credential. */
 export function siteTarget(siteUrl: string): string | null {
   let url: URL;
   try {
@@ -192,7 +204,8 @@ export function checkEditBinding(value: unknown, call: { instanceId: string; nid
 }
 
 /** Refuse before any site call unless the instance row resolved for this write
- * points at the site the binding was read from. */
+ * points at the site, and carries the stored stamp, the binding names. A
+ * consistency check, not authentication (see the trust boundary above). */
 export function checkBindingTarget(binding: EditBinding, instance: { siteUrl: string; updatedAt?: string }): void {
   const now = bindingTarget(instance);
   if (now === null || now.target !== binding.target || now.targetUpdatedAt !== binding.targetUpdatedAt) throw REFUSAL.targetChanged();
