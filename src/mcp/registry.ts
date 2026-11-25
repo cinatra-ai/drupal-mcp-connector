@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isBoundCall } from "../integration/edit-binding";
 import type { ExtensionMcpToolServer, ExtensionMcpToolResult } from "@cinatra-ai/sdk-extensions";
 
 // ---------------------------------------------------------------------------
@@ -159,20 +160,36 @@ const PASSTHROUGH_STEPS: Record<string, { passthroughStep: "read" | "publishing"
 // branch on (`runBound` in ../integration/edit-binding). The server validates a
 // call against the registered schema BEFORE the handler runs, and its errors
 // carry no code, so the three write tools register a schema that publishes
-// exactly the same JSON Schema on tools/list but accepts any value: every
-// property is `unknown` carrying its original JSON Schema as metadata, and
-// a strict schema's unknown keys pass. The handler then parses with the real schema, inside the
-// bound wrapper on a bound call (an unbound call gets that schema's error).
+// exactly the same JSON Schema on tools/list but, for a BOUND call only,
+// accepts any value: every property is `unknown` carrying its original JSON
+// Schema as metadata, and a strict schema's unknown keys pass. The handler then
+// parses with the real schema inside the bound wrapper. An UNBOUND call is
+// validated by the server exactly as before this change: with the real schema,
+// and on update and draft with `fields` required unless `fieldsJson` is given
+// (`fields` was a required member before it got its JSON text form).
 const HANDLER_VALIDATED_TOOL_NAMES = new Set(["drupal_node_update", "drupal_node_publish", "drupal_node_create_draft_revision"]);
+const UNBOUND_FIELDS_REQUIRED = new Set(["drupal_node_update", "drupal_node_create_draft_revision"]);
 
-function handlerValidated(schema: z.ZodTypeAny): z.ZodTypeAny {
+type StandardValidate = (value: unknown) => unknown;
+
+function handlerValidated(name: string, schema: z.ZodTypeAny): z.ZodTypeAny {
   const published = z.toJSONSchema(schema, { io: "input" }) as { properties?: Record<string, Record<string, unknown>> } & Record<string, unknown>;
   const { $schema: _schema, properties = {}, ...objectKeywords } = published;
   const shape = Object.fromEntries(Object.entries(properties).map(([name, property]) => [name, z.unknown().optional().meta(property)]));
   // A strict schema's unknown keys must reach the handler, which refuses them;
   // a stripping schema drops them here exactly as the handler would.
   const object = objectKeywords.additionalProperties === false ? z.object(shape).catchall(z.unknown()) : z.object(shape);
-  return object.meta(objectKeywords);
+  const registered = object.meta(objectKeywords);
+  const fieldsRequired = UNBOUND_FIELDS_REQUIRED.has(name)
+    ? (schema as z.ZodObject).extend({ fields: z.record(z.string(), z.unknown()) }) : schema;
+  const standard = registered["~standard"] as unknown as { validate: StandardValidate } & Record<string, unknown>;
+  const validate: StandardValidate = (value) => {
+    if (isBoundCall(value)) return standard.validate(value);
+    const hasFieldsJson = value !== null && typeof value === "object" && (value as Record<string, unknown>).fieldsJson !== undefined;
+    return ((hasFieldsJson ? schema : fieldsRequired)["~standard"] as { validate: StandardValidate }).validate(value);
+  };
+  Object.defineProperty(registered, "~standard", { value: { ...standard, validate }, configurable: true, writable: true });
+  return registered;
 }
 
 export function registerDrupalPrimitives(server: ExtensionMcpToolServer): void {
@@ -197,7 +214,7 @@ export function registerDrupalPrimitives(server: ExtensionMcpToolServer): void {
       {
         title: name,
         description: meta.description,
-        inputSchema: HANDLER_VALIDATED_TOOL_NAMES.has(name) ? handlerValidated(meta.inputSchema) : meta.inputSchema,
+        inputSchema: HANDLER_VALIDATED_TOOL_NAMES.has(name) ? handlerValidated(name, meta.inputSchema) : meta.inputSchema,
         ...(OUTWARD_TOOL_NAMES.has(name) ? OUTWARD : {}),
         ...(PASSTHROUGH_STEPS[name] ?? {}),
       },

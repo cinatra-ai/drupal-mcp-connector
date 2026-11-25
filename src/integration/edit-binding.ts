@@ -13,11 +13,15 @@ export const MODULE_PUBLISH_UNPUBLISHED = "cinatra_publish_unpublished";
 
 /** The binding of one module read (`cinatra_read_protected_revision` without
  * `revision_id`), as `drupal_node_read_for_edit` returns it. Every module
- * member carries the module's own input name; `instanceId` (the connector
- * instance the page was read from) and `published` are the connector's own and
- * are never sent to the module. A flow passes the object on unchanged. */
+ * member carries the module's own input name. The connector's own members are
+ * never sent to the module: `instanceId` (the connector instance the page was
+ * read from), `target` (`siteTarget` of that instance's site URL at the read),
+ * `targetUpdatedAt` (the instance row's `updatedAt` at the read, or null when
+ * the row has none or an empty one) and `published`. A flow passes the object on unchanged. */
 export type EditBinding = {
   instanceId: string;
+  target: string;
+  targetUpdatedAt: string | null;
   nid: number;
   language: string;
   published: boolean;
@@ -30,8 +34,32 @@ export type EditBinding = {
 
 const BINDING_KEYS = [
   "expected_changed", "expected_default_revision_id", "expected_latest_revision_id",
-  "instanceId", "language", "nid", "preimage_fingerprint", "published", "workflow_fingerprint",
+  "instanceId", "language", "nid", "preimage_fingerprint", "published", "target", "targetUpdatedAt",
+  "workflow_fingerprint",
 ] as const;
+
+/** What a connector instance points at: the normalised base URL of its site
+ * URL, `<scheme>://<host>[:<port>]<base path>` with the scheme and host
+ * lower-cased, a default port dropped, no user name or password, no query or
+ * fragment, and no trailing slash. A clone at another address never has the
+ * same value. Null when the URL is not an http(s) URL. Never a credential. */
+export function siteTarget(siteUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(siteUrl.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
+}
+
+/** The instance members of a binding, from the instance row the call resolved
+ * once: the same row the call then uses for every site call. */
+export function bindingTarget(instance: { siteUrl: string; updatedAt?: string }): { target: string; targetUpdatedAt: string | null } | null {
+  const target = siteTarget(instance.siteUrl);
+  return target === null ? null : { target, targetUpdatedAt: typeof instance.updatedAt === "string" && instance.updatedAt !== "" ? instance.updatedAt : null };
+}
 
 /** A refusal with a stable code a flow can branch on. The message is
  * `<code>: <fixed text>` and never repeats page content or site text. */
@@ -51,6 +79,8 @@ export class DrupalEditRefusal extends Error {
 export const REFUSAL = {
   invalidBinding: () => new DrupalEditRefusal("invalid_binding",
     "expectedBinding must be the binding object from drupal_node_read_for_edit, with every member present and well formed and no other member. Nothing was written."),
+  targetChanged: () => new DrupalEditRefusal("invalid_binding",
+    "This Drupal instance was reconfigured since the read; expectedBinding names its earlier site. Nothing was written. Read the page again."),
   bindingMismatch: () => new DrupalEditRefusal("invalid_binding",
     "expectedBinding names another Drupal instance, page or language than this call. Nothing was written."),
   publishedBinding: () => new DrupalEditRefusal("wrong_page_state",
@@ -119,6 +149,8 @@ export function checkEditBinding(value: unknown, call: { instanceId: string; nid
   const keys = Object.keys(b).sort();
   if (keys.length !== BINDING_KEYS.length || keys.some((key, i) => key !== BINDING_KEYS[i])
     || typeof b.instanceId !== "string" || b.instanceId === ""
+    || typeof b.target !== "string" || b.target === "" || siteTarget(b.target) !== b.target
+    || (b.targetUpdatedAt !== null && (typeof b.targetUpdatedAt !== "string" || b.targetUpdatedAt === ""))
     || !positive(b.nid) || typeof b.language !== "string" || !LANGCODE.test(b.language)
     || typeof b.published !== "boolean"
     || !positive(b.expected_default_revision_id) || !positive(b.expected_latest_revision_id)
@@ -130,7 +162,8 @@ export function checkEditBinding(value: unknown, call: { instanceId: string; nid
   if (b.instanceId !== call.instanceId || b.nid !== call.nid
     || (call.language !== undefined && b.language !== call.language)) throw REFUSAL.bindingMismatch();
   return {
-    instanceId: b.instanceId, nid: b.nid, language: b.language, published: b.published,
+    instanceId: b.instanceId, target: b.target, targetUpdatedAt: b.targetUpdatedAt as string | null,
+    nid: b.nid, language: b.language, published: b.published,
     expected_default_revision_id: b.expected_default_revision_id,
     expected_latest_revision_id: b.expected_latest_revision_id,
     expected_changed: b.expected_changed,
@@ -138,8 +171,15 @@ export function checkEditBinding(value: unknown, call: { instanceId: string; nid
   };
 }
 
+/** Refuse before any site call unless the instance row resolved for this write
+ * points at the site the binding was read from. */
+export function checkBindingTarget(binding: EditBinding, instance: { siteUrl: string; updatedAt?: string }): void {
+  const now = bindingTarget(instance);
+  if (now === null || now.target !== binding.target || now.targetUpdatedAt !== binding.targetUpdatedAt) throw REFUSAL.targetChanged();
+}
+
 /** The binding's members as the module's tools take them: never the
- * connector's own `instanceId` and `published`. */
+ * connector's own `instanceId`, `target`, `targetUpdatedAt` and `published`. */
 export function moduleBindingArgs(binding: EditBinding): Record<string, unknown> {
   return {
     nid: binding.nid, language: binding.language,

@@ -24,13 +24,13 @@ import {
   JSON_ARGUMENT_MAX_BYTES, checkEditBinding, moduleBindingArgs, verifyUnpublishedWrite, type EditBinding,
 } from "../integration/edit-binding";
 
-const instance = { id: "site", name: "Site", siteUrl: "https://example.test", nangoConnectionId: "site", providerConfigKey: "drupal", createdAt: "", updatedAt: "" };
+const instance = { id: "site", name: "Site", siteUrl: "https://Example.test/", nangoConnectionId: "site", providerConfigKey: "drupal", createdAt: "", updatedAt: "2026-11-01T00:00:00.000Z" };
 const A = "a".repeat(64);
 const C = "c".repeat(64);
 const before: StoredFieldItems = { title: [{ value: "Old" }], body: [{ value: "Old body", format: "basic_html", summary: "Keep" }] };
 const unpublishedRead = { node_id: 7, uuid: "uuid-7", language: "de", default_revision_id: 10, latest_revision_id: 10, is_default_revision: true, is_published: false, changed: 1700000000, moderated: false, canonical_moderation_field: false, workflow_fingerprint: A, preimage_fingerprint: C, draft_states: {}, allowed_draft_states: [], available_fields: ["body", "title"] };
 const publishedRead = { ...unpublishedRead, is_published: true, moderated: true, canonical_moderation_field: true, draft_states: { draft: { published: false, default_revision: false } }, allowed_draft_states: ["draft"] };
-const binding: EditBinding = { instanceId: "site", nid: 7, language: "de", published: false, expected_default_revision_id: 10, expected_latest_revision_id: 10, expected_changed: 1700000000, workflow_fingerprint: A, preimage_fingerprint: C };
+const binding: EditBinding = { instanceId: "site", target: "https://example.test", targetUpdatedAt: "2026-11-01T00:00:00.000Z", nid: 7, language: "de", published: false, expected_default_revision_id: 10, expected_latest_revision_id: 10, expected_changed: 1700000000, workflow_fingerprint: A, preimage_fingerprint: C };
 const publishedBinding: EditBinding = { ...binding, published: true };
 const envelope = (result: unknown) => ({ contract: PROTECTED_DRAFT_CONTRACT, result });
 const authority = vi.fn(async () => {});
@@ -98,7 +98,8 @@ describe("drupal_node_read_for_edit", () => {
     expect(calls()[0][2]).toEqual({ nid: 7, fields: ["title"] });
     expect(calls()[1][2]).toEqual({ nid: 7, language: "de", fields: ["body", "title"] });
     for (const c of calls()) expect(c[2]).not.toHaveProperty("revision_id");
-    expect(listDrupalMcpToolNames).not.toHaveBeenCalled();
+    // The read gates on the site's tool list (the module reader) once.
+    expect(listDrupalMcpToolNames).toHaveBeenCalledTimes(1);
     expect(authority).not.toHaveBeenCalled();
     expect(result).toEqual({
       instanceId: "site", nodeId: "7", nid: 7, uuid: "uuid-7", language: "de", published: false,
@@ -212,6 +213,10 @@ describe("drupal_node_update with expectedBinding", () => {
     ["a non-boolean published", { ...binding, published: "false" }],
     ["an extra member", { ...binding, other: 1 }],
     ["no instance", (({ instanceId: _i, ...rest }) => rest)(binding)],
+    ["no target", (({ target: _t, ...rest }) => rest)(binding)],
+    ["a target that is not a normalised base URL", { ...binding, target: "https://example.test/" }],
+    ["a target with credentials", { ...binding, target: "https://user:secret@example.test" }],
+    ["an empty target stamp", { ...binding, targetUpdatedAt: "" }],
     ["an empty instance", { ...binding, instanceId: "" }],
     ["a non-object", "binding"],
   ])("refuses %s before any call", async (_name, expectedBinding) => {
@@ -613,10 +618,56 @@ describe("through the registered MCP server", () => {
     expect(read.binding.instanceId).toBe("site");
   });
 
-  it("never sends the connector's instance to the module", async () => {
+  it("never sends the connector's instance or target to the module", async () => {
     await toolsCall("drupal_node_publish", { instanceId: "site", nodeId: "7", expectedBinding: binding });
-    expect(calls()[0][2]).not.toHaveProperty("instanceId");
-    expect(calls()[0][2]).not.toHaveProperty("published");
+    for (const key of ["instanceId", "target", "targetUpdatedAt", "published"]) expect(calls()[0][2]).not.toHaveProperty(key);
+  });
+
+  it("returns the normalised site target and the row stamp in the read's binding", async () => {
+    const read = JSON.parse((await toolsCall("drupal_node_read_for_edit", { instanceId: "site", nid: "7" })).text) as { binding: EditBinding };
+    expect(read.binding.target).toBe("https://example.test");
+    expect(read.binding.targetUpdatedAt).toBe("2026-11-01T00:00:00.000Z");
+  });
+
+  it.each<[string, Partial<typeof instance>]>([
+    ["another site URL", { siteUrl: "https://clone.example.test" }],
+    ["another base path", { siteUrl: "https://example.test/clone" }],
+    ["a newer row stamp", { updatedAt: "2026-11-02T00:00:00.000Z" }],
+  ])("refuses a binding whose instance id now points at %s before any site call", async (_name, change) => {
+    for (const tool of ["drupal_node_update", "drupal_node_publish", "drupal_node_create_draft_revision"]) {
+      vi.mocked(callDrupalMcp).mockClear();
+      vi.mocked(listDrupalMcpToolNames).mockClear();
+      Object.assign(instance, change);
+      try {
+        const b = tool === "drupal_node_create_draft_revision" ? publishedBinding : binding;
+        const result = await toolsCall(tool, { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: b });
+        expect(result.text).toMatch(/^invalid_binding: .*reconfigured/);
+      } finally {
+        Object.assign(instance, { siteUrl: "https://Example.test/", updatedAt: "2026-11-01T00:00:00.000Z" });
+      }
+      expect(callDrupalMcp).not.toHaveBeenCalled();
+      expect(listDrupalMcpToolNames).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ["drupal_node_create_draft_revision", { fields: { title: "New" }, expectedBinding: publishedBinding }, READER],
+    ["drupal_node_update", { fields: { title: "New" }, expectedBinding: binding }, READER],
+    ["drupal_node_publish", { fields: { title: "New" }, expectedBinding: binding }, READER],
+    ["drupal_node_publish", { expectedBinding: binding }, PUBLISH_UNPUBLISHED],
+    ["drupal_node_create_draft_revision", { fields: { title: "New" }, expectedBinding: publishedBinding }, DRAFT_WRITER],
+  ])("%s refuses a site without a module tool its path calls (%#), naming it, before any call", async (tool, extra, missing) => {
+    vi.mocked(listDrupalMcpToolNames).mockResolvedValue(ALL_TOOLS.filter((t) => t !== missing));
+    const result = await toolsCall(tool, { instanceId: "site", nodeId: "7", ...extra });
+    expect(result.text).toMatch(new RegExp(`^module_capability_missing: .*${missing}`));
+    expect(callDrupalMcp).not.toHaveBeenCalled();
+  });
+
+  it("drupal_node_read_for_edit refuses a site without the module reader, naming it, before any call", async () => {
+    vi.mocked(listDrupalMcpToolNames).mockResolvedValue(ALL_TOOLS.filter((t) => t !== READER));
+    const result = await toolsCall("drupal_node_read_for_edit", { instanceId: "site", nid: "7" });
+    expect(result.text).toMatch(new RegExp(`^module_capability_missing: .*${READER}`));
+    expect(callDrupalMcp).not.toHaveBeenCalled();
   });
 
   it.each<[string, Record<string, unknown>, string]>([
@@ -666,9 +717,17 @@ describe("through the registered MCP server", () => {
     expect(result.text).not.toContain("Secret page words");
   });
 
-  it("keeps the existing message for an unbound drupal_node_update without fields", async () => {
-    const result = await toolsCall("drupal_node_update", { instanceId: "site", nodeId: "7" });
+  // The texts origin/main returns for these unbound calls through the
+  // registered server (its schema validation), unchanged.
+  it.each<[string, Record<string, unknown>, string]>([
+    ["drupal_node_update", { instanceId: "site", nodeId: "7" }, "Input validation error: Invalid arguments for tool drupal_node_update: fields: Invalid input: expected record, received undefined"],
+    ["drupal_node_update", { instanceId: "site", nodeId: 7, fields: { title: "a" } }, "Input validation error: Invalid arguments for tool drupal_node_update: nodeId: Invalid input: expected string, received number"],
+    ["drupal_node_create_draft_revision", { instanceId: "site", nodeId: "7" }, "Input validation error: Invalid arguments for tool drupal_node_create_draft_revision: fields: Invalid input: expected record, received undefined"],
+    ["drupal_node_create_draft_revision", { instanceId: "site", nodeId: "7", fields: { title: "a" }, status: 1 }, 'Input validation error: Invalid arguments for tool drupal_node_create_draft_revision: Unrecognized key: "status"'],
+  ])("keeps origin/main's server validation text for an unbound %s call (%#)", async (tool, args, text) => {
+    const result = await toolsCall(tool, args);
     expect(result.isError).toBe(true);
-    expect(result.text).toBe("No fields provided.");
+    expect(result.text).toBe(text);
+    expect(callDrupalMcp).not.toHaveBeenCalled();
   });
 });

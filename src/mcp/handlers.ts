@@ -17,6 +17,7 @@ import {
   MODULE_WRITE_UNPUBLISHED, MODULE_PUBLISH_UNPUBLISHED, REFUSAL,
   DrupalEditRefusal, checkEditBinding, mapModuleWriteFailure, moduleBindingArgs,
   verifyUnpublishedWrite, boundDraftReadRefusal, editArgumentsOf, isBoundCall, runBound,
+  bindingTarget, checkBindingTarget,
   type BoundStage, type EditBinding,
 } from "../integration/edit-binding";
 // Host-shared runtime surfaces (pagination + A2A dispatch + the instance-admin
@@ -527,6 +528,10 @@ async function boundInstanceAndAuthority(binding: EditBinding | undefined, insta
   } catch (error) {
     throw exitError(binding, REFUSAL.instanceNotFound, error as Error);
   }
+  // The row is resolved once: the same object is compared here and carries
+  // the site URL every later call of this write uses (callDrupalMcp and
+  // listDrupalMcpToolNames take it from `instance.siteUrl`).
+  if (binding) checkBindingTarget(binding, instance);
   try {
     await requireWriteAuthority(instanceId, primitiveName);
   } catch (error) {
@@ -537,7 +542,7 @@ async function boundInstanceAndAuthority(binding: EditBinding | undefined, insta
 
 /** Refuse before any write unless the site lists every named module tool. An
  * older module is refused; no other tool takes its place. */
-async function requireModuleTools(instance: DrupalMcpInstance, tools: string[], stage: BoundStage | undefined): Promise<void> {
+async function requireModuleTools(instance: DrupalMcpInstance, tools: readonly string[], stage: BoundStage | undefined): Promise<void> {
   if (stage) stage.called = true;
   let names: string[];
   try {
@@ -546,6 +551,29 @@ async function requireModuleTools(instance: DrupalMcpInstance, tools: string[], 
     throw REFUSAL.capabilityUnconfirmed();
   }
   for (const tool of tools) if (!names.includes(tool)) throw REFUSAL.capabilityMissing(tool);
+}
+
+/** Every Cinatra module tool each bound tool path calls (a draft also needs
+ * cinatra_write_unpublished, the marker of the module version that binds the
+ * translation). A path gets its module calls only through `moduleTools`, which
+ * gates on this list first and refuses a call outside it, so a call and its
+ * gate cannot drift. */
+const MODULE_TOOLS = {
+  read: [MODULE_READ_REVISION],
+  write: [MODULE_READ_REVISION, MODULE_WRITE_UNPUBLISHED],
+  publish: [MODULE_PUBLISH_UNPUBLISHED],
+  draft: [MODULE_READ_REVISION, MODULE_WRITE_DRAFT, MODULE_WRITE_UNPUBLISHED],
+} as const satisfies Record<string, readonly string[]>;
+
+type ModuleCall = (tool: string, args: Record<string, unknown>) => Promise<unknown>;
+
+async function moduleTools(instance: DrupalMcpInstance, path: keyof typeof MODULE_TOOLS, stage: BoundStage | undefined): Promise<ModuleCall> {
+  const tools: readonly string[] = MODULE_TOOLS[path];
+  await requireModuleTools(instance, tools, stage);
+  return (tool, args) => {
+    if (!tools.includes(tool)) throw new Error("A module call outside its path's gated tools.");
+    return callDrupalMcp(instance, tool, args);
+  };
 }
 
 /** Write (and with `publish` publish) an unpublished page, or with no fields
@@ -560,7 +588,7 @@ async function writeUnpublishedBound(
   stage: BoundStage | undefined,
 ): Promise<Record<string, unknown>> {
   const tool = fields === undefined ? MODULE_PUBLISH_UNPUBLISHED : MODULE_WRITE_UNPUBLISHED;
-  await requireModuleTools(instance, fields === undefined ? [tool] : [tool, MODULE_READ_REVISION], stage);
+  const call = await moduleTools(instance, fields === undefined ? "publish" : "write", stage);
   const requested = fields === undefined ? [] : Object.keys(fields).sort();
   const extra: Record<string, unknown> = {};
   if (fields !== undefined) {
@@ -569,7 +597,7 @@ async function writeUnpublishedBound(
     // compares the binding at the write.
     let stored: Record<string, Record<string, unknown>[]>;
     try {
-      stored = readModuleNode(await callDrupalMcp(instance, MODULE_READ_REVISION, {
+      stored = readModuleNode(await call(MODULE_READ_REVISION, {
         nid: binding.nid, language: binding.language, fields: requested,
       }), binding.nid, requested, binding.language).fields;
     } catch (error) {
@@ -586,7 +614,7 @@ async function writeUnpublishedBound(
   let result: unknown;
   try {
     if (stage) stage.writeSent = true;
-    result = await callDrupalMcp(instance, tool, args);
+    result = await call(tool, args);
   } catch (error) {
     throw mapModuleWriteFailure(error, tool, binding) ?? REFUSAL.writeUnverified();
   }
@@ -681,9 +709,14 @@ export function createDrupalPrimitiveHandlers() {
       const input = nodeReadForEditSchema.parse(request.input);
       const nid = Number(input.nid);
       if (!Number.isSafeInteger(nid) || nid <= 0) throw new Error("Invalid nid: not a positive integer");
+      // The row is resolved once: its target goes into the binding and its
+      // site URL serves every call of this read.
       const instance = await resolveInstance(input.instanceId);
+      const target = bindingTarget(instance);
+      if (target === null) throw new Error("The Drupal instance's site URL is not an http(s) URL.");
+      const call = await moduleTools(instance, "read", undefined);
       const read = async (language: string | undefined, names: string[]) => readModuleEditNode(
-        await callDrupalMcp(instance, MODULE_READ_REVISION, { nid, ...(language === undefined ? {} : { language }), fields: names }),
+        await call(MODULE_READ_REVISION, { nid, ...(language === undefined ? {} : { language }), fields: names }),
         nid, names, language, REFUSAL.readCapabilityMissing,
       );
       const first = await read(input.language, ["title"]);
@@ -697,7 +730,7 @@ export function createDrupalPrimitiveHandlers() {
         throw REFUSAL.readChanged();
       }
       const binding: EditBinding = {
-        instanceId: input.instanceId, nid, language: full.language, published: full.is_published,
+        instanceId: input.instanceId, ...target, nid, language: full.language, published: full.is_published,
         expected_default_revision_id: full.default_revision_id,
         expected_latest_revision_id: full.latest_revision_id,
         expected_changed: full.changed,
@@ -786,7 +819,8 @@ export function createDrupalPrimitiveHandlers() {
       const instance = await boundInstanceAndAuthority(binding, input.instanceId, "drupal_node_create_draft_revision");
       // A bound draft needs the module version whose writers bind the
       // translation and compare the reviewed values.
-      if (binding) await requireModuleTools(instance, [MODULE_WRITE_DRAFT, MODULE_WRITE_UNPUBLISHED], stage);
+      const call: ModuleCall = binding ? await moduleTools(instance, "draft", stage)
+        : (tool, args) => callDrupalMcp(instance, tool, args);
       const nid = Number(input.nodeId);
       const fields = Object.fromEntries(Object.entries(input.fields).filter(([, value]) => value !== ""));
       if (Object.keys(fields).length === 0) throw exitError(binding, REFUSAL.noFields, new Error("No changed fields for a protected draft."));
@@ -816,7 +850,7 @@ export function createDrupalPrimitiveHandlers() {
       const readPreimage = async (identity: ModuleDraftIdentity): Promise<ModuleDraftPlan> => {
         let result: unknown;
         try {
-          result = await callDrupalMcp(instance, MODULE_READ_REVISION, { nid, language, fields: identity.fields });
+          result = await call(MODULE_READ_REVISION, { nid, language, fields: identity.fields });
         } catch (error) {
           if (binding) throw mapModuleWriteFailure(error, MODULE_READ_REVISION, binding) ?? REFUSAL.pageUnreadable();
           throw new Error("Protected draft unavailable: the existing Cinatra module's authorized preimage reader is unavailable. Update and expose its supported MCP tools and check read permission. No Drupal content was written.");
@@ -894,7 +928,7 @@ export function createDrupalPrimitiveHandlers() {
         let writerResult: unknown;
         try {
           if (stage) stage.writeSent = true;
-          writerResult = await callDrupalMcp(instance, MODULE_WRITE_DRAFT, {
+          writerResult = await call(MODULE_WRITE_DRAFT, {
             nid, language, draft_state: plan.state, ...expectedValues, updates,
           });
         } catch (error) {
@@ -908,7 +942,7 @@ export function createDrupalPrimitiveHandlers() {
         // when its field/status envelope fails the full success validation.
         returnedRevisionId = reportedModuleRevisionId(writerResult, expected);
         const written = verifyModuleRevision(writerResult, plan, expected);
-        const stored = verifyModuleRevision(await callDrupalMcp(instance, MODULE_READ_REVISION, {
+        const stored = verifyModuleRevision(await call(MODULE_READ_REVISION, {
           nid, language, revision_id: written.revision_id, fields: fullIdentity.fields,
         }), plan, fullIdentity, written.revision_id);
         for (const name of fullIdentity.fields) {
