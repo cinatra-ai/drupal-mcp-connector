@@ -84,6 +84,8 @@ export const REFUSAL = {
     "The person may not write to this Drupal instance. Nothing was written."),
   draftNotPossible: () => new DrupalEditRefusal("refused",
     "The site's protected draft read does not allow a draft of this page (for example it is not moderated or no single unpublished draft state is permitted). Nothing was written."),
+  updateDoesNotPublish: () => new DrupalEditRefusal("invalid_input",
+    "drupal_node_update does not publish. Publish with drupal_node_publish; with expectedBinding and fields it writes and publishes in one save. Nothing was written."),
   refused: () => new DrupalEditRefusal("refused",
     "The site refused the write. Read the page again before retrying."),
   writeUnverified: () => new DrupalEditRefusal("write_unverified",

@@ -113,6 +113,10 @@ export const nodeUpdateSchema = z.object({
   nodeId: z.string().regex(/^[1-9]\d*$/),
   fields: z.record(z.string(), z.unknown()).optional().describe(FIELDS_DESCRIPTION),
   ...editArguments,
+  // Declared so that validation keeps it and the handler can refuse `true`:
+  // an undeclared key is dropped before the handler runs. Publishing stays on
+  // drupal_node_publish, the tool declared outward.
+  publish: z.boolean().optional().describe("Not supported here: drupal_node_update never publishes and refuses true. Publish with drupal_node_publish (with expectedBinding and fields it writes and publishes in one save)."),
 });
 
 export const nodeCreateDraftSchema = z.object({
@@ -706,15 +710,14 @@ export function createDrupalPrimitiveHandlers() {
 
     drupal_node_update: async (request: ExtensionPrimitiveRequest<unknown>) => {
       const parsed = nodeUpdateSchema.parse(request.input);
-      const edit = editArgumentsOf(parsed);
-      if (edit.fields === undefined) throw new Error("No fields provided.");
       // Publishing goes through drupal_node_publish, the tool declared outward.
-      if ((request.input as { publish?: unknown } | null)?.publish === true) {
-        throw new Error("drupal_node_update does not publish. Publish with drupal_node_publish; with expectedBinding and fields it writes and publishes in one save.");
-      }
+      if (parsed.publish === true) throw REFUSAL.updateDoesNotPublish();
+      const edit = editArgumentsOf(parsed);
       const binding = edit.binding === undefined ? undefined : checkEditBinding(edit.binding, { nid: Number(parsed.nodeId) });
+      if (edit.fields === undefined) throw exitError(binding, REFUSAL.noFields, new Error("No fields provided."));
       if (binding?.published) throw REFUSAL.publishedBinding();
-      const input = { ...parsed, fields: edit.fields };
+      const { publish: _publish, ...rest } = parsed;
+      const input = { ...rest, fields: edit.fields };
       // cinatra#409 — per-user / per-instance write authorization (fail-closed).
       // Throws on deny BEFORE any write reaches the Drupal site.
       const instance = await boundInstanceAndAuthority(binding, input.instanceId, "drupal_node_update");
@@ -768,9 +771,9 @@ export function createDrupalPrimitiveHandlers() {
     drupal_node_create_draft_revision: async (request: ExtensionPrimitiveRequest<unknown>) => {
       const parsed = nodeCreateDraftSchema.parse(request.input);
       const edit = editArgumentsOf(parsed);
-      if (edit.fields === undefined) throw new Error("No fields provided.");
       const binding = edit.binding === undefined ? undefined
         : checkEditBinding(edit.binding, { nid: Number(parsed.nodeId), language: parsed.language });
+      if (edit.fields === undefined) throw exitError(binding, REFUSAL.noFields, new Error("No fields provided."));
       if (binding && !binding.published) throw REFUSAL.unpublishedBinding();
       const input = { ...parsed, fields: edit.fields, language: binding?.language ?? parsed.language };
       const instance = await boundInstanceAndAuthority(binding, input.instanceId, "drupal_node_create_draft_revision");

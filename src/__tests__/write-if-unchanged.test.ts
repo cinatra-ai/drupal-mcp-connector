@@ -5,6 +5,7 @@
 // pass that binding to the Cinatra module's own tools, which compare it again
 // under the node lock. Without a binding every write tool behaves as before.
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 vi.mock("../lib/drupal-mcp-client", () => ({ callDrupalMcp: vi.fn(), listDrupalMcpToolNames: vi.fn() }));
 import { callDrupalMcp, listDrupalMcpToolNames } from "../lib/drupal-mcp-client";
 import { createDrupalPrimitiveHandlers } from "../mcp/handlers";
@@ -499,5 +500,69 @@ describe("without expectedBinding every path is unchanged", () => {
   it("drupal_node_update refuses a call without fields as before", async () => {
     await expect(call("drupal_node_update", { instanceId: "site", nodeId: "7" })).rejects.toThrow();
     expect(callDrupalMcp).not.toHaveBeenCalled();
+  });
+});
+
+// Through the registration: the real MCP server validates each call against
+// the registered input schema (dropping undeclared keys) before the handler
+// runs, so these cases go through tools/call, not the handler directly.
+describe("through the registered MCP server", () => {
+  async function toolsCall(name: string, args: Record<string, unknown>): Promise<{ isError: boolean; text: string }> {
+    const srv = new McpServer({ name: "drupal-mcp-connector-test", version: "0.0.0" });
+    registerDrupalPrimitives({ registerTool: (n: string, c: unknown, h: unknown) => (srv.registerTool as (...a: unknown[]) => unknown)(n, c, h) } as never);
+    const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    await srv.connect(transport);
+    try {
+      const res = await transport.handleRequest(new Request("https://cinatra.test/api/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-11-25" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+      }));
+      const body = await res.json() as { result?: { isError?: boolean; content?: { text?: string }[] }; error?: { message?: string } };
+      if (body.error) return { isError: true, text: body.error.message ?? "" };
+      return { isError: body.result?.isError === true, text: body.result?.content?.[0]?.text ?? "" };
+    } finally {
+      await transport.close();
+    }
+  }
+
+  it("refuses publish: true on a bound drupal_node_update with a coded refusal and writes nothing", async () => {
+    const result = await toolsCall("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: binding, publish: true });
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/invalid_input: .*drupal_node_publish/);
+    expect(writes()).toHaveLength(0);
+  });
+
+  it("refuses publish: true on an unbound drupal_node_update and writes nothing", async () => {
+    const result = await toolsCall("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "New" }, publish: true });
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/invalid_input: /);
+    expect(writes()).toHaveLength(0);
+  });
+
+  it("lets publish: false through as an ordinary bound update", async () => {
+    const result = await toolsCall("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: binding, publish: false });
+    expect(result.isError).toBe(false);
+    expect(calls().find((c) => c[1] === WRITE_UNPUBLISHED)?.[2]).not.toHaveProperty("publish");
+  });
+
+  it.each(["drupal_node_update", "drupal_node_create_draft_revision"])("%s refuses a bound call without fields with invalid_input", async (tool) => {
+    const b = tool === "drupal_node_create_draft_revision" ? publishedBinding : binding;
+    const result = await toolsCall(tool, { instanceId: "site", nodeId: "7", expectedBinding: b });
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/^invalid_input: /);
+    expect(callDrupalMcp).not.toHaveBeenCalled();
+  });
+
+  it("keeps a bound drupal_node_publish without fields as the publish-only call", async () => {
+    const result = await toolsCall("drupal_node_publish", { instanceId: "site", nodeId: "7", expectedBinding: binding });
+    expect(result.isError).toBe(false);
+    expect(toolsCalled()).toEqual([PUBLISH_UNPUBLISHED]);
+  });
+
+  it("keeps the existing message for an unbound drupal_node_update without fields", async () => {
+    const result = await toolsCall("drupal_node_update", { instanceId: "site", nodeId: "7" });
+    expect(result.isError).toBe(true);
+    expect(result.text).toBe("No fields provided.");
   });
 });
