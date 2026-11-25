@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isBoundCall } from "../integration/edit-binding";
+import { isBoundCall, isBoundRefusalResult } from "../integration/edit-binding";
 import type { ExtensionMcpToolServer, ExtensionMcpToolResult } from "@cinatra-ai/sdk-extensions";
 
 // ---------------------------------------------------------------------------
@@ -233,7 +233,13 @@ export function registerDrupalPrimitives(server: ExtensionMcpToolServer): void {
           actor: { actorType: "model", source: "agent" },
           mode: "agentic",
         });
+        // cinatra#3745: a bound write returns its refusal as data. Over MCP it
+        // also reads as a failure (isError) for a model; the structured result
+        // stays the same. Keyed on the call being bound, so no unbound result
+        // ever changes.
+        const refused = HANDLER_VALIDATED_TOOL_NAMES.has(name) && isBoundCall(input) && isBoundRefusalResult(result);
         return {
+          ...(refused ? { isError: true } : {}),
           content: [{ type: "text", text: JSON.stringify(result) }],
           structuredContent: Array.isArray(result)
             ? { items: result }

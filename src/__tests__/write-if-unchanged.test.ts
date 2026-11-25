@@ -79,8 +79,13 @@ const writes = () => calls().filter((c) => [DRAFT_WRITER, WRITE_UNPUBLISHED, PUB
 const handlers = () => createDrupalPrimitiveHandlers();
 const call = (name: keyof ReturnType<typeof createDrupalPrimitiveHandlers>, input: Record<string, unknown>) =>
   (handlers()[name] as (r: unknown) => Promise<unknown>)({ input, primitiveName: name, actor: {}, mode: "agentic" });
+// A refusal as `<code>: <text>`: a bound write RETURNS it as
+// `{ ok: false, code, message }`; an unbound call throws it.
 async function failure(promise: Promise<unknown>): Promise<string> {
-  try { await promise; } catch (error) { return error instanceof Error ? error.message : String(error); }
+  let value: unknown;
+  try { value = await promise; } catch (error) { return error instanceof Error ? error.message : String(error); }
+  const v = value as { ok?: unknown; code?: unknown; message?: unknown } | null;
+  if (v && v.ok === false && typeof v.code === "string" && typeof v.message === "string") return `${v.code}: ${v.message}`;
   throw new Error("expected a refusal");
 }
 
@@ -182,7 +187,7 @@ describe("drupal_node_update with expectedBinding", () => {
       updates: { body: [{ value: "New body", format: "basic_html", summary: "Keep" }] },
     });
     expect(toolsCalled().some((t) => THIRD_PARTY.includes(t))).toBe(false);
-    expect(result).toEqual({ nodeId: "7", nid: 7, language: "de", revision_id: 11, published: false, changed: 1700000100, applied: true, fields: { body: [{ value: "New body", format: "basic_html", summary: "Keep" }] } });
+    expect(result).toEqual({ ok: true, nodeId: "7", nid: 7, language: "de", revision_id: 11, published: false, changed: 1700000100, applied: true, fields: { body: [{ value: "New body", format: "basic_html", summary: "Keep" }] } });
   });
 
   it("refuses with a fixed message naming the module capability when the site lacks cinatra_write_unpublished, and never falls back", async () => {
@@ -258,7 +263,7 @@ describe("drupal_node_update with expectedBinding", () => {
   });
 
   it("refuses publish on drupal_node_update: publishing goes through drupal_node_publish", async () => {
-    await expect(call("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: binding, publish: true })).rejects.toThrow();
+    expect(await failure(call("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: binding, publish: true }))).toMatch(/^invalid_input: /);
     expect(callDrupalMcp).not.toHaveBeenCalled();
   });
 });
@@ -268,7 +273,7 @@ describe("drupal_node_publish with expectedBinding", () => {
     const result = await call("drupal_node_publish", { instanceId: "site", nodeId: "7", expectedBinding: binding });
     expect(toolsCalled()).toEqual([PUBLISH_UNPUBLISHED]);
     expect(calls()[0][2]).toEqual({ nid: 7, language: "de", expected_default_revision_id: 10, expected_latest_revision_id: 10, expected_changed: 1700000000, workflow_fingerprint: A, preimage_fingerprint: C });
-    expect(result).toEqual({ nodeId: "7", nid: 7, language: "de", revision_id: 11, published: true, changed: 1700000100, applied: true, fields: {} });
+    expect(result).toEqual({ ok: true, nodeId: "7", nid: 7, language: "de", revision_id: 11, published: true, changed: 1700000100, applied: true, fields: {} });
   });
 
   it("writes the reviewed fields and publishes in one save through cinatra_write_unpublished", async () => {
@@ -550,7 +555,7 @@ describe("through the registered MCP server", () => {
       expect(actual).toEqual(expected);
     });
 
-  async function toolsCall(name: string, args: Record<string, unknown>): Promise<{ isError: boolean; text: string }> {
+  async function toolsCall(name: string, args: Record<string, unknown>): Promise<{ isError: boolean; text: string; returned?: boolean; structured?: Record<string, unknown> }> {
     const srv = new McpServer({ name: "drupal-mcp-connector-test", version: "0.0.0" });
     registerDrupalPrimitives({ registerTool: (n: string, c: unknown, h: unknown) => (srv.registerTool as (...a: unknown[]) => unknown)(n, c, h) } as never);
     const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
@@ -561,9 +566,21 @@ describe("through the registered MCP server", () => {
         headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-11-25" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
       }));
-      const body = await res.json() as { result?: { isError?: boolean; content?: { text?: string }[] }; error?: { message?: string } };
+      const body = await res.json() as { result?: { isError?: boolean; content?: { text?: string }[]; structuredContent?: Record<string, unknown> }; error?: { message?: string } };
       if (body.error) return { isError: true, text: body.error.message ?? "" };
-      return { isError: body.result?.isError === true, text: body.result?.content?.[0]?.text ?? "" };
+      const structured = body.result?.structuredContent;
+      const bound = args.expectedBinding !== undefined || args.expectedBindingJson !== undefined;
+      if (bound && ["drupal_node_update", "drupal_node_publish", "drupal_node_create_draft_revision"].includes(name)) {
+        // Every bound refusal is RETURNED: isError with exactly { ok, code, message }.
+        if (body.result?.isError === true && !(structured && structured.ok === false)) throw new Error(`a bound ${name} refusal was thrown, not returned`);
+        if (structured && structured.ok === false && Object.keys(structured).sort().join() !== "code,message,ok") throw new Error("a returned refusal carries other members");
+      }
+      // A bound write's returned refusal reads as `<code>: <text>` here, so the
+      // same assertions cover a returned and a thrown refusal; `returned` says which.
+      if (structured && structured.ok === false && typeof structured.code === "string" && typeof structured.message === "string") {
+        return { isError: body.result?.isError === true, text: `${structured.code}: ${structured.message}`, returned: true, structured };
+      }
+      return { isError: body.result?.isError === true, text: body.result?.content?.[0]?.text ?? "", returned: false, structured };
     } finally {
       await transport.close();
     }
@@ -754,6 +771,73 @@ describe("through the registered MCP server", () => {
     const unbound = await toolsCall("drupal_node_create_draft_revision", { instanceId: "site", nodeId: "7", fields: { title: "New" }, status: 1 });
     expect(unbound.isError).toBe(true);
     expect(callDrupalMcp).not.toHaveBeenCalled();
+  });
+
+  // Every code on each bound tool is the tool's RESULT { ok: false, code,
+  // message }, with isError over MCP; the message is the fixed text.
+  function draftSite(o: Route & { readerThrows?: string } = {}) {
+    route({ ...o, read: { ...publishedRead, ...o.read } });
+    const inner = vi.mocked(callDrupalMcp).getMockImplementation()!;
+    vi.mocked(callDrupalMcp).mockImplementation(async (i, tool, args) => {
+      if (tool === "mcp_jsonapi_list_entities") return { items: [{ entity_type: "node", id: 7, uuid: "uuid-7", bundle: "article", status: true, fields: { nid: 7, langcode: "de", title: "Old", body: "Old body" } }] };
+      if (tool === READER && o.readerThrows !== undefined) throw new Error(o.readerThrows);
+      return inner(i, tool, args);
+    });
+  }
+  function readerThrows(text: string) {
+    const inner = vi.mocked(callDrupalMcp).getMockImplementation()!;
+    vi.mocked(callDrupalMcp).mockImplementation(async (i, tool, args) => {
+      if (tool === READER) throw new Error(text);
+      return inner(i, tool, args);
+    });
+  }
+  type Case = [string, string, Record<string, unknown>, () => void];
+  const unpublishedCases = (tool: string): Case[] => [
+    [tool, "invalid_binding", { expectedBinding: { ...binding, extra: 1 } }, () => route()],
+    [tool, "invalid_input", { fields: undefined, fieldsJson: "{not json Secret page words" }, () => route()],
+    [tool, "wrong_page_state", { expectedBinding: publishedBinding }, () => route()],
+    [tool, "module_capability_missing", {}, () => { route(); vi.mocked(listDrupalMcpToolNames).mockResolvedValue([READER]); }],
+    [tool, "permission_denied", {}, () => { route(); authority.mockRejectedValueOnce(new Error("denied Secret page words")); }],
+    [tool, "node_changed", {}, () => route({ writeFailure: "The page revision changed; read it again before editing." })],
+    [tool, "pending_revision", { expectedBinding: { ...binding, expected_latest_revision_id: 11 } }, () => route({ writeFailure: "A newer revision than the current one exists; review it first." })],
+    [tool, "refused", {}, () => route({ writeFailure: "Some future refusal text naming Secret page words" })],
+    [tool, "write_unverified", {}, () => route({ writeThrows: "socket closed: Secret page words" })],
+    [tool, "read_unavailable", {}, () => { route(); readerThrows("fetch failed: Secret page words"); }],
+  ];
+  it.each<Case>([
+    ...unpublishedCases("drupal_node_update"),
+    ...unpublishedCases("drupal_node_publish"),
+    ["drupal_node_create_draft_revision", "invalid_binding", { expectedBinding: { ...publishedBinding, extra: 1 } }, () => draftSite()],
+    ["drupal_node_create_draft_revision", "invalid_input", { fields: undefined, fieldsJson: "{not json Secret page words" }, () => draftSite()],
+    ["drupal_node_create_draft_revision", "wrong_page_state", { expectedBinding: binding }, () => draftSite()],
+    ["drupal_node_create_draft_revision", "module_capability_missing", {}, () => { draftSite(); vi.mocked(listDrupalMcpToolNames).mockResolvedValue([READER, DRAFT_WRITER]); }],
+    ["drupal_node_create_draft_revision", "permission_denied", {}, () => { draftSite(); authority.mockRejectedValueOnce(new Error("denied Secret page words")); }],
+    ["drupal_node_create_draft_revision", "node_changed", {}, () => draftSite({ read: { latest_revision_id: 11 } })],
+    ["drupal_node_create_draft_revision", "pending_revision", { expectedBinding: { ...publishedBinding, expected_latest_revision_id: 11 } }, () => draftSite({ read: { latest_revision_id: 11 } })],
+    ["drupal_node_create_draft_revision", "refused", {}, () => draftSite({ read: { moderated: false } })],
+    ["drupal_node_create_draft_revision", "write_unverified", {}, () => draftSite({ writeThrows: "socket closed: Secret page words" })],
+    ["drupal_node_create_draft_revision", "read_unavailable", {}, () => draftSite({ readerThrows: "fetch failed: Secret page words" })],
+  ])("%s returns %s as its result, never a throw", async (tool, code, extra, setup) => {
+    setup();
+    const b = tool === "drupal_node_create_draft_revision" ? publishedBinding : binding;
+    const args: Record<string, unknown> = { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: b, ...extra };
+    for (const key of Object.keys(args)) if (args[key] === undefined) delete args[key];
+    const result = await toolsCall(tool, args);
+    expect(result.returned).toBe(true);
+    expect(result.isError).toBe(true);
+    expect(result.structured?.code).toBe(code);
+    expect(result.structured?.ok).toBe(false);
+    expect(String(result.structured?.message)).not.toContain("Secret page words");
+    // The same result reaches a host road that calls the handler directly.
+    setup();
+    const direct = await call(tool as never, args) as Record<string, unknown>;
+    expect(direct).toEqual(result.structured);
+  });
+
+  it("returns a successful bound write as { ok: true, ... } without isError", async () => {
+    const result = await toolsCall("drupal_node_update", { instanceId: "site", nodeId: "7", fields: { title: "New" }, expectedBinding: binding });
+    expect(result.isError).toBe(false);
+    expect(result.structured).toMatchObject({ ok: true, applied: true, nodeId: "7", revision_id: 11, fields: { title: [{ value: "New" }] } });
   });
 
   // The one wrapper: an arbitrary throw at each stage leaves as a coded refusal.

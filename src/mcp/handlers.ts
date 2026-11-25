@@ -16,7 +16,7 @@ import {
 import {
   MODULE_WRITE_UNPUBLISHED, MODULE_PUBLISH_UNPUBLISHED, REFUSAL,
   DrupalEditRefusal, checkEditBinding, mapModuleWriteFailure, moduleBindingArgs,
-  verifyUnpublishedWrite, boundDraftReadRefusal, editArgumentsOf, isBoundCall, runBound,
+  verifyUnpublishedWrite, boundDraftReadRefusal, editArgumentsOf, isBoundCall, runBoundResult,
   bindingTarget, checkBindingTarget,
   type BoundStage, type EditBinding,
 } from "../integration/edit-binding";
@@ -506,11 +506,13 @@ async function readCurrentNodeForDraft(
 type WriteHandler = (request: ExtensionPrimitiveRequest<unknown>, stage: BoundStage | undefined) => Promise<unknown>;
 
 /** A write tool decides FIRST whether the call is bound (either binding form
- * present) and then runs a bound call inside `runBound`, the one place that
- * turns every error into a coded refusal. An unbound call runs as before. */
+ * present) and then runs a bound call inside `runBoundResult`: `runBound`, the
+ * one place that turns every error into a coded refusal, returns it as the
+ * tool's result `{ ok: false, code, message }`, and a success as `{ ok: true,
+ * ... }`. An unbound call runs, and throws, as before. */
 function boundAware(handler: WriteHandler) {
   return (request: ExtensionPrimitiveRequest<unknown>) => isBoundCall(request.input)
-    ? runBound((stage) => handler(request, stage))
+    ? runBoundResult((stage) => handler(request, stage))
     : handler(request, undefined);
 }
 

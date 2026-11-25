@@ -97,11 +97,25 @@ export function bindingTarget(instance: { siteUrl: string; updatedAt?: string })
  * `<code>: <fixed text>` and never repeats page content or site text. */
 export class DrupalEditRefusal extends Error {
   readonly code: string;
+  /** The fixed text without the code. */
+  readonly text: string;
   constructor(code: string, text: string) {
     super(`${code}: ${text}`);
     this.name = "DrupalEditRefusal";
     this.code = code;
+    this.text = text;
   }
+}
+
+/** A bound write's refusal as the tool's RESULT: a flow step branches on
+ * `code`; `message` is the fixed text, never input or site text. */
+export type BoundRefusalResult = { ok: false; code: string; message: string };
+
+/** True for a result a bound write returned as a refusal. */
+export function isBoundRefusalResult(value: unknown): value is BoundRefusalResult {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return v.ok === false && typeof v.code === "string" && typeof v.message === "string";
 }
 
 // ---------------------------------------------------------------------------
@@ -450,4 +464,19 @@ export function editArgumentsOf(input: { fields?: Record<string, unknown>; field
   const binding = coded("invalid_binding", () => objectOrJsonText(input.expectedBinding, input.expectedBindingJson, BINDING_ARGUMENT));
   const fields = coded("invalid_input", () => objectOrJsonText(input.fields, input.fieldsJson, FIELDS_ARGUMENT));
   return { fields, binding };
+}
+
+/** A bound write as a RESULT, never a throw: its own result with `ok: true`,
+ * or every refusal (each code `runBound` produces, `write_unverified`
+ * included) as `{ ok: false, code, message }`. A flow step cannot branch on a
+ * thrown error: the host's passthrough road answers it with a fixed failure. */
+export async function runBoundResult(body: (stage: BoundStage) => Promise<unknown>): Promise<Record<string, unknown>> {
+  try {
+    const result = await runBound(body);
+    return { ...(result as Record<string, unknown>), ok: true };
+  } catch (error) {
+    // runBound turns every error into a DrupalEditRefusal.
+    const refusal = error instanceof DrupalEditRefusal ? error : REFUSAL.writeUnverified();
+    return { ok: false, code: refusal.code, message: refusal.text } satisfies BoundRefusalResult;
+  }
 }
