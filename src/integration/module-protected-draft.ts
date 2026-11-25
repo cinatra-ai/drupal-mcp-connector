@@ -178,6 +178,31 @@ export function readModuleNode(value: unknown, nid: number, requested: string[],
   };
 }
 
+export type ModuleEditRead = ModuleNodeRead & {
+  latest_revision_id: number; changed: number;
+  workflow_fingerprint: string; preimage_fingerprint: string;
+};
+
+/** Validate one module read for an edit bound to it (cinatra#3745): a plain
+ * node read (see readModuleNode) of the default revision that also carries the
+ * complete binding: latest revision, changed time and both fingerprints. A
+ * read without `changed` comes from a module version without the bound
+ * unpublished writers; `missingBinding` is thrown for it. */
+export function readModuleEditNode(value: unknown, nid: number, requested: string[], language: string | undefined, missingBinding: () => Error): ModuleEditRead {
+  const read = readModuleNode(value, nid, requested, language);
+  const result = payload(value);
+  if (typeof result.changed !== "number" || !Number.isSafeInteger(result.changed) || result.changed < 0
+    || !positiveInteger(result.latest_revision_id)
+    || !fingerprint(result.workflow_fingerprint) || !fingerprint(result.preimage_fingerprint)) {
+    throw missingBinding();
+  }
+  if (result.is_default_revision !== true) refusal("the module reader did not return the default revision.");
+  return {
+    ...read, latest_revision_id: result.latest_revision_id, changed: result.changed,
+    workflow_fingerprint: result.workflow_fingerprint, preimage_fingerprint: result.preimage_fingerprint,
+  };
+}
+
 /** Preserve stored format/summary and never guess an empty field's schema. */
 export function structureModuleUpdates(fields: Record<string, unknown>, before: StoredFieldItems): StoredFieldItems {
   const updates: StoredFieldItems = {};

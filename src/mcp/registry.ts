@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isBoundCall, isBoundRefusalResult } from "../integration/edit-binding";
 import type { ExtensionMcpToolServer, ExtensionMcpToolResult } from "@cinatra-ai/sdk-extensions";
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,8 @@ import {
   nodeListSchema,
   nodeUpdateSchema,
   nodeCreateDraftSchema,
+  nodePublishSchema,
+  nodeReadForEditSchema,
   drupalContentEditorRunSchema,
 } from "./handlers";
 
@@ -89,14 +92,19 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
       "Read a Drupal node by id. Iterates the 100 most-recent nodes via mcp_tools_get_recent_content and matches on node id (drupal/mcp_tools has no direct get-by-id primitive). Returns the matching node object or throws if the node is not in the recent 100.",
     inputSchema: nodeGetSchema,
   },
+  drupal_node_read_for_edit: {
+    description:
+      "Read a Drupal page for an edit through the Cinatra module reader only: every editable field value (fields, and stored_fields with the structured items), whether the page is published, and binding, the read's revision, changed-time, workflow and content binding. Pass binding unchanged as expectedBinding (or expectedBindingJson) to the write tool: the write then happens only if the page is unchanged since this read. Writes nothing.",
+    inputSchema: nodeReadForEditSchema,
+  },
   drupal_node_update: {
     description:
-      "Update fields on an existing unpublished Drupal node after reading its actual status. Refuses published or unknown-status nodes: generic update cannot target a protected draft revision.",
+      "Update fields on an existing unpublished Drupal node after reading its actual status. Refuses published or unknown-status nodes: generic update cannot target a protected draft revision. With expectedBinding from drupal_node_read_for_edit the update goes through the Cinatra module and happens only if the page is unchanged since that read; a changed page is refused with node_changed. Fields may be sent as fieldsJson text.",
     inputSchema: nodeUpdateSchema,
   },
   drupal_node_create_draft_revision: {
     description:
-      "Request an atomic protected draft edit of the SAME published node using instanceId, nodeId, fields, optional explicit language and optional expectedFields from an earlier read. Uses the existing Cinatra Drupal module's protected writer and exact-revision reader and returns actual pendingDraft beforeFields and independently stored fields. Refuses stale expected fields, unavailable preimages or unsafe moderation before its writer; failed verification after dispatch requires inspection because a draft may have been saved. Never creates a new node or follows with generic update.",
+      "Request an atomic protected draft edit of the SAME published node using instanceId, nodeId, fields, optional explicit language and optional expectedFields from an earlier read. Uses the existing Cinatra Drupal module's protected writer and exact-revision reader and returns actual pendingDraft beforeFields and independently stored fields. Refuses stale expected fields, unavailable preimages or unsafe moderation before its writer; failed verification after dispatch requires inspection because a draft may have been saved. Never creates a new node or follows with generic update. With expectedBinding from drupal_node_read_for_edit the writer compares that read's binding, so a page changed since the reviewed read is refused with node_changed. Fields may be sent as fieldsJson text.",
     inputSchema: nodeCreateDraftSchema,
   },
   drupal_node_list: {
@@ -106,8 +114,8 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
   },
   drupal_node_publish: {
     description:
-      "Publish a draft Drupal node. Converts nodeId string to integer nid and calls mcp_publish_content with publish:true.",
-    inputSchema: nodeGetSchema,
+      "Publish a draft Drupal node. Converts nodeId string to integer nid and calls mcp_publish_content with publish:true. With expectedBinding from drupal_node_read_for_edit it publishes the unpublished page through the Cinatra module only if the page is unchanged since that read (a changed page is refused with node_changed); with fields as well it writes them and publishes in one save.",
+    inputSchema: nodePublishSchema,
   },
   drupal_content_editor_run: {
     description:
@@ -129,6 +137,60 @@ const TOOL_META: Record<string, { description: string; inputSchema: z.ZodTypeAny
 // config type without the field still accepts it.
 const OUTWARD_TOOL_NAMES = new Set(["drupal_node_publish"]);
 const OUTWARD = { outward: {} };
+
+// cinatra#3745 (owner decision 1234 A): a flow step reads the page and writes
+// the reviewed change without a model. The host serves a connector tool to such
+// a step only when its registration declares `passthroughStep`:
+//   - "read": served to a verified step whose tool list names the tool, with no
+//     person's decision; the host allows it only on a registration with no
+//     `outward`. drupal_node_read_for_edit calls only the Cinatra module reader
+//     without a revision, so this road cannot write.
+//   - "publishing": served only to a declared publishing step whose card a
+//     person released, consumed once per released decision.
+// Spread from a constant, like `outward`, so an SDK config type without the
+// field accepts it. A host that does not read the field ignores it.
+const PASSTHROUGH_STEPS: Record<string, { passthroughStep: "read" | "publishing" }> = {
+  drupal_node_read_for_edit: { passthroughStep: "read" },
+  drupal_node_update: { passthroughStep: "publishing" },
+  drupal_node_create_draft_revision: { passthroughStep: "publishing" },
+  drupal_node_publish: { passthroughStep: "publishing" },
+};
+
+// cinatra#3745: a bound write answers every refusal with a code a flow can
+// branch on (`runBound` in ../integration/edit-binding). The server validates a
+// call against the registered schema BEFORE the handler runs, and its errors
+// carry no code, so the three write tools register a schema that publishes
+// exactly the same JSON Schema on tools/list but, for a BOUND call only,
+// accepts any value: every property is `unknown` carrying its original JSON
+// Schema as metadata, and a strict schema's unknown keys pass. The handler then
+// parses with the real schema inside the bound wrapper. An UNBOUND call is
+// validated by the server exactly as before this change: with the real schema,
+// and on update and draft with `fields` required unless `fieldsJson` is given
+// (`fields` was a required member before it got its JSON text form).
+const HANDLER_VALIDATED_TOOL_NAMES = new Set(["drupal_node_update", "drupal_node_publish", "drupal_node_create_draft_revision"]);
+const UNBOUND_FIELDS_REQUIRED = new Set(["drupal_node_update", "drupal_node_create_draft_revision"]);
+
+type StandardValidate = (value: unknown) => unknown;
+
+function handlerValidated(name: string, schema: z.ZodTypeAny): z.ZodTypeAny {
+  const published = z.toJSONSchema(schema, { io: "input" }) as { properties?: Record<string, Record<string, unknown>> } & Record<string, unknown>;
+  const { $schema: _schema, properties = {}, ...objectKeywords } = published;
+  const shape = Object.fromEntries(Object.entries(properties).map(([name, property]) => [name, z.unknown().optional().meta(property)]));
+  // A strict schema's unknown keys must reach the handler, which refuses them;
+  // a stripping schema drops them here exactly as the handler would.
+  const object = objectKeywords.additionalProperties === false ? z.object(shape).catchall(z.unknown()) : z.object(shape);
+  const registered = object.meta(objectKeywords);
+  const fieldsRequired = UNBOUND_FIELDS_REQUIRED.has(name)
+    ? (schema as z.ZodObject).extend({ fields: z.record(z.string(), z.unknown()) }) : schema;
+  const standard = registered["~standard"] as unknown as { validate: StandardValidate } & Record<string, unknown>;
+  const validate: StandardValidate = (value) => {
+    if (isBoundCall(value)) return standard.validate(value);
+    const hasFieldsJson = value !== null && typeof value === "object" && (value as Record<string, unknown>).fieldsJson !== undefined;
+    return ((hasFieldsJson ? schema : fieldsRequired)["~standard"] as { validate: StandardValidate }).validate(value);
+  };
+  Object.defineProperty(registered, "~standard", { value: { ...standard, validate }, configurable: true, writable: true });
+  return registered;
+}
 
 export function registerDrupalPrimitives(server: ExtensionMcpToolServer): void {
   const handlers = createDrupalPrimitiveHandlers();
@@ -152,8 +214,9 @@ export function registerDrupalPrimitives(server: ExtensionMcpToolServer): void {
       {
         title: name,
         description: meta.description,
-        inputSchema: meta.inputSchema,
+        inputSchema: HANDLER_VALIDATED_TOOL_NAMES.has(name) ? handlerValidated(name, meta.inputSchema) : meta.inputSchema,
         ...(OUTWARD_TOOL_NAMES.has(name) ? OUTWARD : {}),
+        ...(PASSTHROUGH_STEPS[name] ?? {}),
       },
       async (input): Promise<ExtensionMcpToolResult> => {
         const result = await handler({
@@ -170,7 +233,13 @@ export function registerDrupalPrimitives(server: ExtensionMcpToolServer): void {
           actor: { actorType: "model", source: "agent" },
           mode: "agentic",
         });
+        // cinatra#3745: a bound write returns its refusal as data. Over MCP it
+        // also reads as a failure (isError) for a model; the structured result
+        // stays the same. Keyed on the call being bound, so no unbound result
+        // ever changes.
+        const refused = HANDLER_VALIDATED_TOOL_NAMES.has(name) && isBoundCall(input) && isBoundRefusalResult(result);
         return {
+          ...(refused ? { isError: true } : {}),
           content: [{ type: "text", text: JSON.stringify(result) }],
           structuredContent: Array.isArray(result)
             ? { items: result }
